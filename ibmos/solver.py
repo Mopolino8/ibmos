@@ -641,6 +641,6 @@ class Solver:
             if xlim:
                 plt.xlim(*xlim)
             if ylim:
-                plt.xlim(*ylim)
+                plt.ylim(*ylim)
 
         plt.tight_layout()
