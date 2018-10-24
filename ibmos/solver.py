@@ -335,8 +335,8 @@ class Solver:
 
                 if self.solids:
                     fp1 = self.unpack(xp1)[3:]
-                    for k, solid in enumerate(self.solids):
-                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * k]), 2 * np.sum(fp1[2 * k + 1])), end=' ')
+                    for l, solid in enumerate(self.solids):
+                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * l]), 2 * np.sum(fp1[2 * l + 1])), end=' ')
                 print()
 
             x = xp1
@@ -450,8 +450,8 @@ class Solver:
 
                 if self.solids:
                     fp1 = self.unpack(xp1)[3:]
-                    for k, solid in enumerate(self.solids):
-                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * k]), 2 * np.sum(fp1[2 * k + 1])), end=' ')
+                    for l, solid in enumerate(self.solids):
+                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * l]), 2 * np.sum(fp1[2 * l + 1])), end=' ')
                 print()
 
             # Prepare for the next time step
