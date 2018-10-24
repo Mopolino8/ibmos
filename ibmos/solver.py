@@ -89,7 +89,7 @@ class Solver:
         self.A, self.B, self.J = None, None, None
         self.iA, self.iJ = None, None
         self.iRe, self.Co, self.dt = None, None, None
-        self.initialized = False
+        self.fractionalStep = None
 
     def set_Re_and_Co(self, Re, Co):
         """Set time step, Reynolds and Courant numbers.
@@ -154,13 +154,16 @@ class Solver:
 
         return J
 
-    def propagator(self):
+    def propagator(self, fractionalStep):
         """Return propagator.
+
+        fractionalStep: bool, optional
+            Propagators for fractional step method.
 
         Returns
         -------
         tuple:
-            A and B matrices.
+            Propagator matrices.
 
         """
         Mu, Mv = self.fluid.u.weight_width(), self.fluid.v.weight_height()
@@ -182,15 +185,34 @@ class Solver:
 
         Z = sp.coo_matrix((Q.shape[0],) * 2)
 
-        A = sp.bmat([[M / self.dt - 0.5 * self.iRe * L, Q.T], [Q, Z]]).tocsc()
+        A = (M / self.dt - 0.5 * self.iRe * L).tocsc()
+        B = (M / self.dt + 0.5 * self.iRe * L).tocsr()
+        BB = sp.block_diag((B, Z)).tocsr()
 
-        # If we use UMFPACK, A should have 64-bit indices.
-        if spla.dsolve.linsolve.useUmfpack:
-            A.indptr = A.indptr.astype(np.int64)
-            A.indices = A.indices.astype(np.int64)
+        if fractionalStep:
+            iM = M.copy()
+            iM.data[:] = 1 / M.data[:]
 
-        B = sp.block_diag((M / self.dt + 0.5 * self.iRe * L, Z)).tocsr()
-        return A, B
+            iML = iM @ L
+
+            BN = self.dt*iM + (0.5*self.iRe)*self.dt**2*iML@iM + (0.5*self.iRe)**2*self.dt**3*iML@(iML@iM)
+
+            QBNQT = (Q @ (BN @ Q.T)).tocsc()
+
+            # If we use UMFPACK, A should have 64-bit indices.
+            if spla.dsolve.linsolve.useUmfpack:
+                A.indptr, A.indices = A.indptr.astype(np.int64), A.indices.astype(np.int64)
+                QBNQT.indptr, QBNQT.indices = QBNQT.indptr.astype(np.int64), QBNQT.indices.astype(np.int64)
+
+            return (A, QBNQT), (B, BN, Q)
+        else:
+            AA = sp.bmat([[A, Q.T], [Q, Z]]).tocsc()
+
+            # If we use UMFPACK, A should have 64-bit indices.
+            if spla.dsolve.linsolve.useUmfpack:
+                AA.indptr, AA.indices = AA.indptr.astype(np.int64), AA.indices.astype(np.int64)
+
+            return (AA,), (BB,)
 
     def boundary_condition_terms(self, uBC, vBC, *sBC):
         """Return contribution of the boundary terms to the right-hand-side.
@@ -359,7 +381,7 @@ class Solver:
 
         return x, xres, fres, k
 
-    def steps(self, x, uBC, vBC, sBC=(), number=1, reportEvery=1, saveEvery=None, Nm1=None, fractionalStep=False):
+    def steps(self, x, uBC, vBC, sBC=(), number=1, reportEvery=1, saveEvery=None, Nm1=None, fractionalStep=True):
         """Time-step the governing equations.
 
         Parameters
@@ -386,16 +408,12 @@ class Solver:
             Advection terms at the previous time-step. If None, the first
             step is performed using explicit Euler method.
         fractionalStep : bool, optional
-            Use Fractional Step Method (not implemented yet).
+            Use Fractional Step Method.
 
         Returns
         -------
         xres : list (np.ndarray)
             Flow fields sampled every saveEvery steps.
-
-        TODO
-        ----
-            Implement fractional step method.
 
         """
 
@@ -404,14 +422,13 @@ class Solver:
 
         xres = []
 
-        if fractionalStep:
-            raise ValueError("This method does not support yet the fractionalStep flag")
-
         # If this is the first time we call steps, we must build A, B and factorize A.
-        if not self.initialized:
-            self.A, self.B = self.propagator()
-            self.iA = spla.factorized(self.A)  # Time consuming.
-            self.initialized = True
+        if fractionalStep != self.fractionalStep:
+            print("Initializing solver...", end='')
+            self.fractionalStep = fractionalStep
+            self.A, self.B = self.propagator(fractionalStep)
+            self.iA = [spla.factorized(Ak) for Ak in self.A]  # Time consuming.
+            print('done')
 
         # Advection terms at the CURRENT time step.
         N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
@@ -434,13 +451,23 @@ class Solver:
 
         # Main loop.
         for k in range(number):
-            # Build right-hand-side:
+            # Build right-hand-side.
             # terms at current time step plus boundary conditions plus advection.
-            b = self.B @ x + bc
-            b[:self.pStart] += -1.5 * N + 0.5 * Nm1
+            # And compute timestep
 
-            # Compute next time step.
-            xp1 = self.iA(b)  # Time consuming.
+            # Compute next time step. Time consuming part
+            if fractionalStep:
+                b = self.B[0] @ x[:self.pStart] + bc[:self.pStart]
+                b += -1.5 * N + 0.5 * Nm1
+
+                qast = self.iA[0](b)
+                λ = self.iA[1](self.B[2]@qast - bc[self.pStart:])
+                xp1 = np.r_[qast - self.B[1]@(self.B[2].T@λ), λ]
+            else:
+                b = self.B[0] @ x + bc
+                b[:self.pStart] += -1.5 * N + 0.5 * Nm1
+                xp1 = self.iA[0](b)
+
             xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
 
             # If verbose, print current step, time, residuals and, if we have immersed boundaries,
