@@ -10,3 +10,16 @@ methods to fluid flows and their investigation using stability analysis tools.
 We gratefully acknowledge financial support from MINECO through the *Programa
 Estatal de Retos de I+D+i Orientada a los Retos de la Sociedad*, grant number
 DPI2016-75777-R AEI/FEDER, UE.
+
+
+Installation instructions
+*************************
+
+Type the following commands in the terminal:
+
+.. code-block:: bash
+
+    $ git clone https://github.com/miguelfp/ibmos.git
+    $ cd ibmos
+    
+    $ pip install -e .
