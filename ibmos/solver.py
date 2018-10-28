@@ -2,10 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from .flow import Field
-
+from .tools import solver_default
 
 class Solver:
     """Flow solver based on the Projection-based Immersed Boundary Method.
@@ -21,8 +20,9 @@ class Solver:
 
     field: Field
     solids: list = []
+    solver = None
 
-    def __init__(self, x, y, Re=None, Co=0.8, *solids):
+    def __init__(self, x, y, iRe=1.0, Co=0.5, fractionalStep=False, solver=solver_default(), *solids):
         """Initialize solver.
 
         Parameters
@@ -31,10 +31,14 @@ class Solver:
             Coordinates of the vertices (x direction).
         y : np.array
             Coordinates of the vertices (y direction).
-        Re : float, optional
-            Reynolds number.
+        iRe : float, optional
+            Inverse of the Reynolds number.
         Co : float, optional
             Courant number.
+        fractionalStep : bool, optional
+            Fractional Step Method flag.
+        solver : callable, optional
+            `solver(A)` that returns linear solver.
         solids : list, optional
             List of solids. """
 
@@ -52,14 +56,73 @@ class Solver:
         # pEnd points to the first value after the last pressure value.
         self.pStart = self.fluid.u.size + self.fluid.v.size
         self.pEnd = self.pStart + self.fluid.p.size
+        
+        # Set parameters
+        self.set_iRe(iRe)
+        self.set_Co(Co)
+        self.set_fractional_step(fractionalStep)
+        self.set_solver(solver)
+        
+        self.set_solids(*solids)
+        
+    def cleanup(self):
+        """Clean-up structures that must be recomputed after calls to set_*."""
+        
+        self.A, self.B, self.iA = None, None, None
+        self.stepsInitialized = False
+        
+    def set_iRe(self, iRe):
+        """Set inverse of the Reynolds number.
+        
+        Parameters
+        ----------
+        iRe : float
+            Inverse of the Reynolds number.
+            
+        """
+        self.iRe = iRe
+        self.cleanup()
+ 
 
-        # Mark solver as uninitialized
+    def set_Co(self, Co):
+        """Set courant number.
+        
+        Parameters
+        ----------
+        Co : float
+            Courant number.
+        """
+        
+        self.dt = Co * min(self.dxmin ** 2 / self.iRe, self.dxmin)
         self.cleanup()
 
-        if Re:
-            self.set_Re_and_Co(Re, Co)
 
-        self.set_solids(*solids)
+    def set_fractional_step(self, fractionalStep):
+        """Set fractional step method flag.
+
+        Parameters
+        ----------
+        fractionalStep : bool
+            Fractional step method flag.
+            
+        """
+        
+        self.fractionalStep = fractionalStep
+        self.cleanup()
+        
+    def set_solver(self, solver):
+        """Set linear solver.
+
+        Parameters
+        ----------
+        solver : callable.
+            Linear solver.
+            
+        """
+        
+        self.solver = solver
+        self.cleanup()
+
 
     def set_solids(self, *solids):
         """Set immersed boundaries (solids).
@@ -82,28 +145,9 @@ class Solver:
             Eu = solid.interpolation(self.fluid.u)
             Ev = solid.interpolation(self.fluid.v)
             self.E.append((Eu, Ev))
-
-    def cleanup(self):
-        """Mark solver as uninitialized."""
-
-        self.A, self.B, self.J = None, None, None
-        self.iA, self.iJ = None, None
-        self.iRe, self.Co, self.dt = None, None, None
-        self.fractionalStep = None
-
-    def set_Re_and_Co(self, Re, Co):
-        """Set time step, Reynolds and Courant numbers.
-
-        Parameters
-        ----------
-        Re : float
-            Reynolds number.
-        Co : float
-            Courant number.
-        """
+            
         self.cleanup()
 
-        self.iRe, self.Co, self.dt = 1 / Re, Co, Co * min(self.dxmin ** 2 * Re, self.dxmin)
 
     def jacobian(self, uBC, vBC, u0=None, v0=None):
         """Return Jacobian.
@@ -146,11 +190,6 @@ class Solver:
             J = sp.bmat([[-self.iRe * L + N, Q.T], [Q, Z]]).tocsc()
         else:
             J = sp.bmat([[-self.iRe * L, Q.T], [Q, Z]]).tocsc()
-
-        # If we use UMFPACK, A should have 64-bit indices.
-        if spla.dsolve.linsolve.useUmfpack:
-            J.indptr = J.indptr.astype(np.int64)
-            J.indices = J.indices.astype(np.int64)
 
         return J
 
@@ -199,20 +238,12 @@ class Solver:
 
             QBNQT = (Q @ (BN @ Q.T)).tocsc()
 
-            # If we use UMFPACK, A should have 64-bit indices.
-            if spla.dsolve.linsolve.useUmfpack:
-                A.indptr, A.indices = A.indptr.astype(np.int64), A.indices.astype(np.int64)
-                QBNQT.indptr, QBNQT.indices = QBNQT.indptr.astype(np.int64), QBNQT.indices.astype(np.int64)
-
             return (A, QBNQT), (B, BN, Q)
         else:
             AA = sp.bmat([[A, Q.T], [Q, Z]]).tocsc()
 
-            # If we use UMFPACK, A should have 64-bit indices.
-            if spla.dsolve.linsolve.useUmfpack:
-                AA.indptr, AA.indices = AA.indptr.astype(np.int64), AA.indices.astype(np.int64)
-
             return (AA,), (BB,)
+
 
     def boundary_condition_terms(self, uBC, vBC, *sBC):
         """Return contribution of the boundary terms to the right-hand-side.
@@ -247,8 +278,9 @@ class Solver:
 
         return self.pack(bu, bv, bD, *sBC)
 
-    def steady_state(self, x0, uBC, vBC, sBC=(), xtol=1e-8, ftol=1e-8, maxit=15,
-                     verbose=True, checkJacobian=False, outflowEast=False):
+
+    def steady_state(self, x0, uBC, vBC, sBC=(), outflowEast=False, xtol=1e-8, ftol=1e-8,
+                     maxit=15, checkJacobian=False, verbose=True):
         """Compute steady state solution using exact Newton-Raphson iterations.
 
         Parameters
@@ -264,19 +296,19 @@ class Solver:
         sBC : list, optional
             List of np.ndarray with the horizontal and vertical component of
             the velocity on the immersed boundaries.
+        outflowEast: bool, optional
+            Specify if the East boundary has an outflow boundary condition.
         xtol : float, optional
             Tolerance on the solution |x^{k+1} - x^k|_2/|x^k|_2.
         ftol : float, optional
             Tolerance on the function |f^{k+1} - f^k|_2/|b|_2.
         maxit : int, optional
             Maximum number of iterations.
+        checkJacobian : bool, optional
+            Check Jacobian against first-order finite difference approximation.
         verbose : bool, optional
             Enable verbose output. Output includes iteration count, residuals
             and forces on the immersed boundaries.
-        checkJacobian : bool, optional
-            Check Jacobian against first-order finite difference approximation.
-        outflowEast: bool, optional
-            Specify if the East boundary has an outflow boundary condition.
 
         Returns
         -------
@@ -342,7 +374,7 @@ class Solver:
                 if ftol <= eerr:
                     print("Warning: Jacobian might not be accurate enough (eerr=%12e)" % eerr)
 
-            xp1 = x - spla.factorized(J)(residual)  # Time consuming.
+            xp1 = x - self.solver(J)[0](residual)  # Time consuming.
             xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
 
             # How much has the solution changed? How close is f(x^{k+1}) to zero?
@@ -381,7 +413,8 @@ class Solver:
 
         return x, xres, fres, k
 
-    def steps(self, x, uBC, vBC, sBC=(), number=1, reportEvery=1, saveEvery=None, Nm1=None, fractionalStep=True):
+
+    def steps(self, x, uBC, vBC, sBC=(), outflowEast=False, number=1, reportEvery=1, saveEvery=None, Nm1=None, verbose=False):
         """Time-step the governing equations.
 
         Parameters
@@ -397,6 +430,9 @@ class Solver:
         sBC : list, optional
             List of np.ndarray with the horizontal and vertical component of
             the velocity on the immersed boundaries.
+        outflowEast : bool, optional
+            East boundary has outflow boundary condition. Note that uBC[1]
+            and vBC[1] are updated every each iteration.
         number : int, optional
             Number of time steps.
         reportEvery : int, optional
@@ -407,8 +443,8 @@ class Solver:
         Nm1 : np.ndarray, optional
             Advection terms at the previous time-step. If None, the first
             step is performed using explicit Euler method.
-        fractionalStep : bool, optional
-            Use Fractional Step Method.
+        verbose : bool, optional
+            Print verbose information.
 
         Returns
         -------
@@ -416,19 +452,15 @@ class Solver:
             Flow fields sampled every saveEvery steps.
 
         """
+        if not self.stepsInitialized:
+            self.A, self.B = self.propagator(self.fractionalStep)
+            self.iA = [self.solver(Ak)[0] for Ak in self.A]
+            self.stepsInitialized = True
 
         if saveEvery is None:
             saveEvery = number
 
         xres = []
-
-        # If this is the first time we call steps, we must build A, B and factorize A.
-        if fractionalStep != self.fractionalStep:
-            print("Initializing solver...", end='')
-            self.fractionalStep = fractionalStep
-            self.A, self.B = self.propagator(fractionalStep)
-            self.iA = [spla.factorized(Ak) for Ak in self.A]  # Time consuming.
-            print('done')
 
         # Advection terms at the CURRENT time step.
         N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
@@ -447,6 +479,13 @@ class Solver:
             if self.solids:
                 for k, solid in enumerate(self.solids):
                     print("%8s(fx) %8s(fy)" % (solid.name, solid.name), end=' ')
+            if outflowEast:
+                print("Uinf@outlet", end=' ')
+            if verbose:
+                if self.fractionalStep:
+                    print("rel.error(A) rel.error(C)", end=' ')
+                else:
+                    print("rel.error(A)", end=' ')
             print()
 
         # Main loop.
@@ -456,7 +495,7 @@ class Solver:
             # And compute timestep
 
             # Compute next time step. Time consuming part
-            if fractionalStep:
+            if self.fractionalStep:
                 b = self.B[0] @ x[:self.pStart] + bc[:self.pStart]
                 b += -1.5 * N + 0.5 * Nm1
 
@@ -469,6 +508,14 @@ class Solver:
                 xp1 = self.iA[0](b)
 
             xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
+            
+            if outflowEast:
+                u, v = self.reshape(*self.unpack(xp1))[:2]
+                
+                Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
+                uBC[1][:] = uBC[1][:] - Uinf*self.dt/(self.fluid.x[-1]-self.fluid.x[-2])*(uBC[1][:] - u[:,-1])
+                vBC[1][:] = vBC[1][:] - Uinf*self.dt/(self.fluid.x[-1]-self.fluid.x[-2])*(vBC[1][:] - v[:,-1])
+                bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
             # If verbose, print current step, time, residuals and, if we have immersed boundaries,
             # the nondimensional horizontal and vertical force on each body.
@@ -479,6 +526,19 @@ class Solver:
                     fp1 = self.unpack(xp1)[3:]
                     for l, solid in enumerate(self.solids):
                         print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * l]), 2 * np.sum(fp1[2 * l + 1])), end=' ')
+                        
+                if outflowEast:
+                    print("%12.9f"%Uinf, end=' ')
+                    
+                if verbose:
+                    if self.fractionalStep:
+                        errA = la.norm(self.A[0]@qast - b)/la.norm(b)
+                        errB = la.norm(self.A[1]@λ - self.B[2]@qast + bc[self.pStart:])/la.norm(self.B[2]@qast - bc[self.pStart:])
+                        print("%12e %12e" % (errA, errB), end='')
+                    else:
+                        errA = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
+                        print("%12e" % errA, end='')
+                    
                 print()
 
             # Prepare for the next time step
@@ -611,7 +671,19 @@ class Solver:
         return [field.reshape(shape) for field, shape in zip(fields, self.shapes())]
 
     def plot_domain(self, equal=True, figsize=(6, 6), xlim=(), ylim=()):
-        """Plot domain and immersed boundaries."""
+        """Plot domain and immersed boundaries.
+        
+        Parameters
+        ----------
+        equal: bool, optional
+            Use equal axes.
+        figsize: optional, tuple
+            Size of the figure.
+        xlim: optional, tuple
+            x limits.
+        ylim: optional, tuple
+            y limits.
+        """
 
         fig = plt.figure(figsize=figsize)
         plt.title('Fluid domain and immersed boundaries')
@@ -642,8 +714,19 @@ class Solver:
         ----------
         x: np.ndarray
             State vector (packed).
+        colorbar: bool, optional
+            Display colorbar.
+        equal: bool, optional
+            Use equal axes.
+        figsize: optional, tuple
+            Size of the figure.
+        xlim: optional, tuple
+            x limits.
+        ylim: optional, tuple
+            y limits.
 
         """
+        
         u, v, p = self.reshape(*self.unpack(x))[:3]
 
         fig = plt.figure(figsize=figsize)
