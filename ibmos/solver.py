@@ -1,3 +1,5 @@
+from itertools import chain
+
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg as la
@@ -280,7 +282,7 @@ class Solver:
 
 
     def steady_state(self, x0, uBC, vBC, sBC=(), outflowEast=False, xtol=1e-8, ftol=1e-8,
-                     maxit=15, checkJacobian=False, verbose=True):
+                     maxit=15, verbose=True, checkJacobian=False):
         """Compute steady state solution using exact Newton-Raphson iterations.
 
         Parameters
@@ -304,22 +306,18 @@ class Solver:
             Tolerance on the function |f^{k+1} - f^k|_2/|b|_2.
         maxit : int, optional
             Maximum number of iterations.
-        checkJacobian : bool, optional
-            Check Jacobian against first-order finite difference approximation.
         verbose : bool, optional
             Enable verbose output. Output includes iteration count, residuals
             and forces on the immersed boundaries.
+        checkJacobian : bool, optional
+            Check Jacobian against numerical approximation.
 
         Returns
         -------
         x : np.ndarray
             Result of the last iteration.
-        xres : float
-            Residual of the solution.
-        fres : float
-            Residual of the function.
-        k : int
-            Number of iterations performed.
+        infodict : dict
+            Information on the performed iterations.
 
         """
 
@@ -332,13 +330,19 @@ class Solver:
         x = x0.copy()
         x[self.pStart:self.pEnd] -= np.mean(x[self.pStart:self.pEnd])
 
-        # Print (if verbose) the headings for the output.
+            
+        # Dictionary with output variables
+        header = ['residual_x', 'residual_f']
+        header.extend(chain(*[(f'{solid.name}_fx', f'{solid.name}_fy')
+                              for solid in self.solids]))
+
+        # Create dictionary
+        infodict = dict(zip(header, ([] for _ in header)))
+
+        # If verbose, print header.
         if verbose:
-            print("  step  residual(x)  residual(f)", end=' ')
-            if self.solids:
-                for k, solid in enumerate(self.solids):
-                    print("%8s(fx) %8s(fy)" % (solid.name, solid.name), end=' ')
-            print()
+            print("   k", "".join((f'{elem:>12} ' for elem in header)))
+
 
         # Newton-Raphson iterations
         for k in range(maxit):
@@ -379,19 +383,20 @@ class Solver:
 
             # How much has the solution changed? How close is f(x^{k+1}) to zero?
             xp1mx = xp1 - x
-            xres = la.norm(xp1mx) / la.norm(xp1)
-            fres = la.norm(residual) / la.norm(b)
-
+            
+            infodict['residual_x'].append(la.norm(xp1mx) / la.norm(xp1))
+            infodict['residual_f'].append(la.norm(residual) / la.norm(b))
+            
+            if self.solids:
+                fp1 = self.unpack(xp1)[3:]
+                for l, solid in enumerate(self.solids):
+                    infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[2*l]))
+                    infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[2*l+1]))
+                    
             # Print (if verbose) the iteration count, residuals and forces
             # on the immersed boundaries.
             if verbose:
-                print("%6d %12e %12e" % (k + 1, xres, fres), end=' ')
-
-                if self.solids:
-                    fp1 = self.unpack(xp1)[3:]
-                    for l, solid in enumerate(self.solids):
-                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * l]), 2 * np.sum(fp1[2 * l + 1])), end=' ')
-                print()
+                print(f"{k+1:4}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
             x = xp1
 
@@ -405,16 +410,19 @@ class Solver:
                 bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
             # If the tolerances are reached, stop iterating.
-            if xres < xtol and fres < ftol:
+            if infodict['residual_x'][-1] < xtol and infodict['residual_f'][-1] < ftol:
                 break
         else:
             if verbose:
                 print("Warning: maximum number of iterations reached (maxit=%d)" % maxit)
 
-        return x, xres, fres, k
+        infodict.update((key, np.asarray(value)) for key, value in infodict.items())
+
+        return x, infodict
 
 
-    def steps(self, x, uBC, vBC, sBC=(), outflowEast=False, number=1, reportEvery=1, saveEvery=None, Nm1=None, verbose=False):
+    def steps(self, x, uBC, vBC, sBC=(), outflowEast=False, number=1, saveEvery=None, 
+              verbose=1, checkSolvers=False, Nm1=None):
         """Time-step the governing equations.
 
         Parameters
@@ -435,21 +443,25 @@ class Solver:
             and vBC[1] are updated every each iteration.
         number : int, optional
             Number of time steps.
-        reportEvery : int, optional
-            Specify how often dq/dt and forces are displayed.
         saveEvery : int, optional
             Specify how often flow fields are stored. By default, only the
             last one is returned.
+        verbose : int, optional
+            Specify how often x_2, dx/dt_2 and forces are displayed.
+        checkSolvers : bool, optional
+            Check linear solvers.
         Nm1 : np.ndarray, optional
             Advection terms at the previous time-step. If None, the first
             step is performed using explicit Euler method.
-        verbose : bool, optional
-            Print verbose information.
 
         Returns
         -------
-        xres : list (np.ndarray)
+        xres : (np.ndarray)
             Flow fields sampled every saveEvery steps.
+        tres: list (np.ndarray)
+            Time.
+        infodict: dict
+            Norm of the state vector, temporal derivative, and forces.
 
         """
         if not self.stepsInitialized:
@@ -460,7 +472,7 @@ class Solver:
         if saveEvery is None:
             saveEvery = number
 
-        xres = []
+        xres, tres = [], []
 
         # Advection terms at the CURRENT time step.
         N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
@@ -473,23 +485,30 @@ class Solver:
         # Contribution of the boundary conditions to the right-hand-side.
         bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
+        # Dictionary with output variables
+        header = ['t', 'x_2', 'dxdt_2']
+        header.extend(chain(*[(f'{solid.name}_fx', f'{solid.name}_fy')
+                              for solid in self.solids]))
+        if outflowEast:
+            header.append('Uinf@outlet')
+        if checkSolvers:
+            if self.fractionalStep:
+                header.extend(['rel.error(A)', 'rel.error(C)'])
+            else:
+                header.append('rel.error(A)')
+
+        # Create dictionary
+        infodict = dict(zip(header, (np.empty(number) for _ in header)))
+
         # If verbose, print header.
-        if reportEvery:
-            print("  step      t        residual  ", end=' ')
-            if self.solids:
-                for k, solid in enumerate(self.solids):
-                    print("%8s(fx) %8s(fy)" % (solid.name, solid.name), end=' ')
-            if outflowEast:
-                print("Uinf@outlet", end=' ')
-            if verbose:
-                if self.fractionalStep:
-                    print("rel.error(A) rel.error(C)", end=' ')
-                else:
-                    print("rel.error(A)", end=' ')
-            print()
+        if verbose:
+            print("       k", "".join((f'{elem:>12} ' for elem in header)))
+
 
         # Main loop.
         for k in range(number):
+            infodict['t'][k] = (k+1)*self.dt
+
             # Build right-hand-side.
             # terms at current time step plus boundary conditions plus advection.
             # And compute timestep
@@ -502,44 +521,43 @@ class Solver:
                 qast = self.iA[0](b)
                 λ = self.iA[1](self.B[2]@qast - bc[self.pStart:])
                 xp1 = np.r_[qast - self.B[1]@(self.B[2].T@λ), λ]
+
+                if checkSolvers:
+                    infodict['rel.error(A)'][k] = la.norm(self.A[0]@qast - b)/la.norm(b)
+                    infodict['rel.error(C)'][k] = la.norm(self.A[1]@λ - self.B[2]@qast + bc[self.pStart:])/la.norm(self.B[2]@qast - bc[self.pStart:])
             else:
                 b = self.B[0] @ x + bc
                 b[:self.pStart] += -1.5 * N + 0.5 * Nm1
                 xp1 = self.iA[0](b)
 
+                if checkSolvers:
+                    infodict['rel.error(A)'][k] = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
+
             xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
-            
+
+            infodict['x_2'][k] = la.norm(xp1)
+            infodict['dxdt_2'][k] = la.norm(xp1-x)/self.dt
+
+            if self.solids:
+                fp1 = self.unpack(xp1)[3:]
+                for l, solid in enumerate(self.solids):
+                    infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[2*l])
+                    infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[2*l+1])
+
             if outflowEast:
                 u, v = self.reshape(*self.unpack(xp1))[:2]
                 
                 Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
-                uBC[1][:] = uBC[1][:] - Uinf*self.dt/(self.fluid.x[-1]-self.fluid.x[-2])*(uBC[1][:] - u[:,-1])
-                vBC[1][:] = vBC[1][:] - Uinf*self.dt/(self.fluid.x[-1]-self.fluid.x[-2])*(vBC[1][:] - v[:,-1])
+                infodict['Uinf@outlet'][k] = Uinf
+                dx = (self.fluid.x[-1]-self.fluid.x[-2])
+                uBC[1][:] = uBC[1][:] - Uinf*self.dt/dx*(uBC[1][:] - u[:,-1])
+                vBC[1][:] = vBC[1][:] - Uinf*self.dt/dx*(vBC[1][:] - v[:,-1])
                 bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
-            # If verbose, print current step, time, residuals and, if we have immersed boundaries,
-            # the nondimensional horizontal and vertical force on each body.
-            if reportEvery and (k + 1) % reportEvery == 0:
-                print("%6d %11.6f %12e" % (k + 1, (k + 1) * self.dt, la.norm(xp1 - x) / la.norm(xp1)), end=' ')
-
-                if self.solids:
-                    fp1 = self.unpack(xp1)[3:]
-                    for l, solid in enumerate(self.solids):
-                        print("%12.9f %12.9f" % (2 * np.sum(fp1[2 * l]), 2 * np.sum(fp1[2 * l + 1])), end=' ')
-                        
-                if outflowEast:
-                    print("%12.9f"%Uinf, end=' ')
-                    
-                if verbose:
-                    if self.fractionalStep:
-                        errA = la.norm(self.A[0]@qast - b)/la.norm(b)
-                        errB = la.norm(self.A[1]@λ - self.B[2]@qast + bc[self.pStart:])/la.norm(self.B[2]@qast - bc[self.pStart:])
-                        print("%12e %12e" % (errA, errB), end='')
-                    else:
-                        errA = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
-                        print("%12e" % errA, end='')
-                    
-                print()
+            # If reportEvery is not None, print current step, time, residuals and,
+            # if we have immersed boundaries, print also the forces.
+            if verbose and ((k + 1) % verbose == 0 or (k + 1) == number):
+                print(f"{k+1:8}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
             # Prepare for the next time step
             x = xp1
@@ -550,9 +568,10 @@ class Solver:
             # Append vector to xres?
             if (k + 1) % saveEvery == 0:
                 xres.append(x)
+                tres.append((k+1)*self.dt)
 
         # Return state vectors
-        return xres
+        return np.squeeze(xres), np.squeeze(tres), infodict
 
     def shapes(self):
         """Return the shapes of the fields stacked in the state vector.
