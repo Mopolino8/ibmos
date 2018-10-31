@@ -527,8 +527,9 @@ class Solver:
                 b = self.B[0] @ x[:self.pStart] + bc[:self.pStart]
                 b += -1.5 * N + 0.5 * Nm1
 
-                qast = self.iA[0](b)
-                λ = self.iA[1](self.B[2]@qast - bc[self.pStart:])
+                qast = self.iA[0](b, x0=None if k==0 else qast)
+                λ = self.iA[1](self.B[2]@qast - bc[self.pStart:], x0=None if k==0 else λ)
+
                 xp1 = np.r_[qast - self.B[1]@(self.B[2].T@λ), λ]
 
                 if checkSolvers:
@@ -537,7 +538,7 @@ class Solver:
             else:
                 b = self.B[0] @ x + bc
                 b[:self.pStart] += -1.5 * N + 0.5 * Nm1
-                xp1 = self.iA[0](b)
+                xp1 = self.iA[0](b, x0=None if k==0 else xp1)
 
                 if checkSolvers:
                     infodict['rel.error(A)'][k] = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
