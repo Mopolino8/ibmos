@@ -388,7 +388,7 @@ class Solver:
                 if ftol <= eerr:
                     print("Warning: Jacobian might not be accurate enough (eerr=%12e)" % eerr)
 
-            xp1 = x - self.solver(J)[0](residual)  # Time consuming.
+            xp1 = x - self.solver(J)[0](residual, x0=None if k==0 else x-xp1)  # Time consuming.
 
             # How much has the solution changed? How close is f(x^{k+1}) to zero?
             xp1mx = xp1 - x
