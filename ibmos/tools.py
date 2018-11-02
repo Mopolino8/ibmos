@@ -3,34 +3,6 @@ import numpy as np
 from scipy.special import erf
 
 
-def solver_cg(A):
-    from scipy.sparse.linalg import cg, spilu, LinearOperator
-
-    M = LinearOperator(A.shape, matvec=spilu(A).solve)
-
-    def solver(b, x0=None):
-        x, info = cg(A, b, x0=x0, M=M, tol=1e-8)
-        if info != 0:
-            raise ValueError(f'CG failed: info={info}')
-        return x
-
-    return solver,
-
-
-def solver_minres(A):
-    from scipy.sparse.linalg import minres, spilu, LinearOperator
-
-    M = LinearOperator(A.shape, matvec=spilu(A).solve)
-
-    def solver(b, x0=None):
-        x, info = minres(A, b, x0=x0, M=M, tol=1e-8)
-        if info != 0:
-            raise ValueError(f'MINRES failed: info={info}')
-        return x
-
-    return solver,
-
-
 def solver_pardiso(A):
     """ 
     Return a function for solving a sparse linear system using PARDISO.
@@ -57,10 +29,10 @@ def solver_pardiso(A):
     pypardisosolver.set_iparm(11, 1) # 0 disable, 1 enable scaling vectors.
     pypardisosolver.set_iparm(13, 0) # 0 disable, 1 matching normal, 2 advanced matching
     
-    #solver.set_iparm(21, 0) #pivoting symmetric indefinite. 1 enable
-    #solver.set_iparm(24, 1) #parallel numerial factorization, 1 improved algo
-    #solver.set_iparm(25, 1) #parallel backward forward, 1 enabled
-    #solver.set_statistical_info_on()
+    #pypardisosolver.set_iparm(21, 0) #pivoting symmetric indefinite. 1 enable
+    #pypardisosolver.set_iparm(24, 1) #parallel numerial factorization, 1 improved algo
+    #pypardisosolver.set_iparm(25, 1) #parallel backward forward, 1 enabled
+    #pypardisosolver.set_statistical_info_on()
 
     def solver(b, x0=None):
         return spsolve(A, b, squeeze=False, solver=pypardisosolver)
@@ -130,6 +102,97 @@ def solver_umfpack(A):
         return iA(b)
 
     spla.use_solver(useUmfpack=_useUmfpack)
+
+    return solver,
+
+
+def solver_pcg_ilu(A):
+    """ 
+    Return a function for solving a sparse linear system using PCG with ILU.
+    
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Input.
+        
+    Returns
+    -------
+    solve : callable
+        To solve the linear system of equations given in `A`, the `solve`
+        callable should be passed an ndarray of shape (N,).
+        
+    """
+
+    from scipy.sparse.linalg import cg, spilu, LinearOperator
+
+    M = LinearOperator(A.shape, matvec=spilu(A).solve)
+
+    def solver(b, x0=None):
+        x, info = cg(A, b, x0=x0, M=M)
+        if info != 0:
+            raise ValueError(f'CG failed: info={info}')
+        return x
+
+    return solver,
+
+
+def solver_pcg_amg(A):
+    """ 
+    Return a function for solving a sparse linear system using PCG with AMG.
+    
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Input.
+        
+    Returns
+    -------
+    solve : callable
+        To solve the linear system of equations given in `A`, the `solve`
+        callable should be passed an ndarray of shape (N,).
+        
+    """
+
+    from scipy.sparse.linalg import cg
+    from pyamg import rootnode_solver
+    
+    M = rootnode_solver(A).aspreconditioner(cycle='V')
+
+    def solver(b, x0=None):
+        x, info = cg(Acopy, b, x0=x0, M=M)
+        if info != 0:
+            raise ValueError(f'CG failed: info={info}')
+        return x
+
+    return solver,
+
+
+def solver_pminres_ilu(A):
+    """ 
+    Return a function for solving a sparse linear system using MINRES with ILU.
+    
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Input.
+        
+    Returns
+    -------
+    solve : callable
+        To solve the linear system of equations given in `A`, the `solve`
+        callable should be passed an ndarray of shape (N,).
+        
+    """
+
+    from scipy.sparse.linalg import minres, spilu, LinearOperator
+
+    M = LinearOperator(A.shape, matvec=spilu(A).solve)
+
+    def solver(b, x0=None):
+        x, info = minres(A, b, x0=x0, M=M)
+        if info != 0:
+            raise ValueError(f'MINRES failed: info={info}')
+        return x
 
     return solver,
 
