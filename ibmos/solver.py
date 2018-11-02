@@ -57,7 +57,7 @@ class Solver:
         # pStart points to the first pressure value in this state vector
         # pEnd points to the first value after the last pressure value.
         self.pStart = self.fluid.u.size + self.fluid.v.size
-        self.pEnd = self.pStart + self.fluid.p.size
+        self.pEnd = self.pStart + self.fluid.p.size - 1  # First value not included
         
         # Set parameters
         self.set_iRe(iRe)
@@ -178,7 +178,11 @@ class Solver:
 
         # Divergence-free constraint plus velocity boundary condition on
         # immersed boundaries (if needed).
-        Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]))]
+        Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]), format='csr') ]
+
+        # Suppress first row -> set value of the pressure to zero at the first node.
+        Q[0] = Q[0][1:, :]
+
         if self.solids:
             for Eu, Ev in self.E:
                 Q.append(sp.block_diag((Eu, Ev), format='csr'))
@@ -218,7 +222,11 @@ class Solver:
 
         # Divergence-free constraint plus velocity boundary condition on
         # immersed boundaries (if needed).
-        Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]))]
+        Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]), format='csr')]
+
+        # Suppress first row -> set value of the pressure to zero at the first node.
+        Q[0] = Q[0][1:, :]
+
         if self.solids:
             for Eu, Ev in self.E:
                 Q.append(sp.block_diag((Eu, Ev), format='csr'))
@@ -275,10 +283,15 @@ class Solver:
         bu = np.sum([self.iRe * A @ x for A, x in zip(self.laplacian[0][1], uBC)], axis=0)
         bv = np.sum([self.iRe * A @ x for A, x in zip(self.laplacian[1][1], vBC)], axis=0)
 
-        bD = np.sum([A @ x for A, x in zip(self.divergence[0][1], uBC[:2])], axis=0) + \
-             np.sum([A @ x for A, x in zip(self.divergence[1][1], vBC[2:])], axis=0)
+        # RHS terms for the divergence eq. except for the first cell (pressure set to zero)
+        bD = (np.sum([A @ x for A, x in zip(self.divergence[0][1], uBC[:2])], axis=0) +
+              np.sum([A @ x for A, x in zip(self.divergence[1][1], vBC[2:])], axis=0))[1:]
 
-        return self.pack(bu, bv, bD, *sBC)
+        bc = [bu, bv, bD]
+        for sBCk in sBC:
+            bc.append(np.r_[sBCk])
+
+        return np.concatenate(bc)
 
 
     def steady_state(self, x0, uBC, vBC, sBC=(), outflowEast=False, xtol=1e-8, ftol=1e-8,
@@ -326,11 +339,9 @@ class Solver:
         # Build Jacobian without advection terms.
         JnoAdv = self.jacobian(uBC, vBC)
 
-        # Copy state vector and subtract mean pressure.
+        # Copy state vector.
         x = x0.copy()
-        x[self.pStart:self.pEnd] -= np.mean(x[self.pStart:self.pEnd])
 
-            
         # Dictionary with output variables
         header = ['residual_x', 'residual_f']
         header.extend(chain(*[(f'{solid.name}_fx', f'{solid.name}_fy')
@@ -362,7 +373,6 @@ class Solver:
             if checkJacobian:
                 h = 1e-8
                 xtmp = x + 1j * h * np.random.random(x.shape)
-                xtmp[self.pStart:self.pEnd] -= np.mean(xtmp[self.pStart:self.pEnd])
 
                 btmp = np.asarray(bc, dtype=xtmp.dtype)
                 u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
@@ -379,7 +389,6 @@ class Solver:
                     print("Warning: Jacobian might not be accurate enough (eerr=%12e)" % eerr)
 
             xp1 = x - self.solver(J)[0](residual)  # Time consuming.
-            xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
 
             # How much has the solution changed? How close is f(x^{k+1}) to zero?
             xp1mx = xp1 - x
@@ -533,8 +542,6 @@ class Solver:
                 if checkSolvers:
                     infodict['rel.error(A)'][k] = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
 
-            xp1[self.pStart:self.pEnd] -= np.mean(xp1[self.pStart:self.pEnd])
-
             infodict['x_2'][k] = la.norm(xp1)
             infodict['dxdt_2'][k] = la.norm(xp1-x)/self.dt
 
@@ -599,7 +606,7 @@ class Solver:
             (u.size, v.size, p.size, [(l1, l1), (l2, l2), ...])
 
         """
-        sizes = [self.fluid.u.size, self.fluid.v.size, self.fluid.p.size]
+        sizes = [self.fluid.u.size, self.fluid.v.size, self.fluid.p.size - 1]
 
         if self.solids:
             for solid in self.solids:
@@ -650,7 +657,7 @@ class Solver:
             Concatenated fields (u, v, p, [f1, g1, f2, g2, ...]).
         """
 
-        fields = [u.ravel(), v.ravel(), p.ravel()]
+        fields = [u.ravel(), v.ravel(), p.ravel()[1:]-p[0, 0]]
 
         for (f, g) in s:
             fields.append(f)
@@ -687,7 +694,15 @@ class Solver:
             (u, v, p, [f1, g1, f2, g2, ...]) fields (reshaped)
         """
 
-        return [field.reshape(shape) for field, shape in zip(fields, self.shapes())]
+        reshaped = []
+
+        for k, (field, shape) in enumerate(zip(fields, self.shapes())):
+            if k!=2:
+                reshaped.append(field.reshape(shape))
+            else:
+                reshaped.append(np.r_[0, field].reshape(shape))
+
+        return reshaped
 
     def plot_domain(self, equal=True, figsize=(6, 6), xlim=(), ylim=()):
         """Plot domain and immersed boundaries.
