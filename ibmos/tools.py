@@ -91,7 +91,7 @@ def solver_umfpack(A):
     
     import scipy.sparse.linalg as spla
 
-    _useUmfpack = spla.dsolve.linsolve.useUmfpack
+    #_useUmfpack = spla.dsolve.linsolve.useUmfpack
     spla.use_solver(useUmfpack=True)
 
     A.indptr = A.indptr.astype(np.int64)
@@ -101,7 +101,7 @@ def solver_umfpack(A):
     def solver(b, x0=None):
         return iA(b)
 
-    spla.use_solver(useUmfpack=_useUmfpack)
+    #spla.use_solver(useUmfpack=_useUmfpack)
 
     return solver,
 
@@ -128,7 +128,7 @@ def solver_pcg_ilu(A):
     M = LinearOperator(A.shape, matvec=spilu(A).solve)
 
     def solver(b, x0=None):
-        x, info = cg(A, b, x0=x0, M=M)
+        x, info = cg(A.T, b, x0=x0, M=M)
         if info != 0:
             raise ValueError(f'CG failed: info={info}')
         return x
@@ -156,10 +156,10 @@ def solver_pcg_amg(A):
     from scipy.sparse.linalg import cg
     from pyamg import rootnode_solver
     
-    M = rootnode_solver(A).aspreconditioner(cycle='V')
+    M = rootnode_solver(A.T).aspreconditioner(cycle='V')
 
     def solver(b, x0=None):
-        x, info = cg(Acopy, b, x0=x0, M=M)
+        x, info = cg(A.T, b, x0=x0, M=M)
         if info != 0:
             raise ValueError(f'CG failed: info={info}')
         return x
@@ -186,10 +186,10 @@ def solver_pminres_ilu(A):
 
     from scipy.sparse.linalg import minres, spilu, LinearOperator
 
-    M = LinearOperator(A.shape, matvec=spilu(A).solve)
+    M = LinearOperator(A.shape, matvec=spilu(A.solve))
 
     def solver(b, x0=None):
-        x, info = minres(A, b, x0=x0, M=M)
+        x, info = minres(A.T, b, x0=x0, M=M)
         if info != 0:
             raise ValueError(f'MINRES failed: info={info}')
         return x

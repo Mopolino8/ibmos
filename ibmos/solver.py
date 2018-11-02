@@ -193,9 +193,9 @@ class Solver:
         # If u0 and v0 are provided, the Jacobian includes advection terms.
         if u0 is not None and v0 is not None:
             N = self.fluid.linearized_advection(u0, v0, uBC, vBC)
-            J = sp.bmat([[-self.iRe * L + N, Q.T], [Q, Z]]).tocsc()
+            J = sp.bmat([[-self.iRe * L + N, Q.T], [Q, Z]]).tocsr()
         else:
-            J = sp.bmat([[-self.iRe * L, Q.T], [Q, Z]]).tocsc()
+            J = sp.bmat([[-self.iRe * L, Q.T], [Q, Z]]).tocsr()
 
         return J
 
