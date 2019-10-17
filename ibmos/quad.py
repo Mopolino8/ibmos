@@ -5,7 +5,7 @@ import scipy.sparse as sp
 
 
 def _fx(m, periodic=False, fmt='csr'):
-    """Build operator for \int_{x_i}^{x_{i+1}} f_x dx
+    """Build operator for $$\int_{x_i}^{x_{i+1}} f_x dx$$
 
     Parameters
     ----------
@@ -28,7 +28,7 @@ def _fx(m, periodic=False, fmt='csr'):
 
 
 def _fxx(x, periodic=False, fmt='csr'):
-    """Build operator for \int_{x_i}^{x_{i+1}} f_{xx} dx.
+    """Build operator for $$\int_{x_i}^{x_{i+1}} f_{xx} dx$$.
 
     Parameters
     ----------
