@@ -367,6 +367,7 @@ class Solver:
 
 
         # Newton-Raphson iterations
+        try:
         for k in range(maxit):
             # Build right-hand-side vector: bc + advection terms.
             b = bc.copy()
@@ -435,6 +436,9 @@ class Solver:
         else:
             if verbose:
                 print("Warning: maximum number of iterations reached (maxit=%d)" % maxit)
+        except KeyboardInterrupt:
+            print("Interrupting at iteration number", k)
+            pass 
 
         infodict.update((key, np.asarray(value)) for key, value in infodict.items())
 
