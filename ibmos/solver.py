@@ -368,74 +368,74 @@ class Solver:
 
         # Newton-Raphson iterations
         try:
-        for k in range(maxit):
-            # Build right-hand-side vector: bc + advection terms.
-            b = bc.copy()
+            for k in range(maxit):
+                # Build right-hand-side vector: bc + advection terms.
+                b = bc.copy()
 
-            u0, v0 = self.reshape(*self.unpack(x))[:2]
-            b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
+                u0, v0 = self.reshape(*self.unpack(x))[:2]
+                b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
 
-            # Compute residual vector
-            residual = JnoAdv @ x - b
+                # Compute residual vector
+                residual = JnoAdv @ x - b
 
-            # Compute next estimate of the solution and subtract the average pressure.
-            # The linear system is solved using direct methods.
-            J = self.jacobian(uBC, vBC, u0, v0)
+                # Compute next estimate of the solution and subtract the average pressure.
+                # The linear system is solved using direct methods.
+                J = self.jacobian(uBC, vBC, u0, v0)
 
-            if checkJacobian:
-                h = 1e-8
-                xtmp = x + 1j * h * np.random.random(x.shape)
+                if checkJacobian:
+                    h = 1e-8
+                    xtmp = x + 1j * h * np.random.random(x.shape)
 
-                btmp = np.asarray(bc, dtype=xtmp.dtype)
-                u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
+                    btmp = np.asarray(bc, dtype=xtmp.dtype)
+                    u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
 
-                btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
+                    btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
 
-                residualtmp = JnoAdv @ xtmp - btmp
+                    residualtmp = JnoAdv @ xtmp - btmp
 
-                e1 = residualtmp.imag / h
-                e2 = J @ ((xtmp - x).imag / h)
-                eerr = la.norm(e1 - e2) / la.norm(e1)
+                    e1 = residualtmp.imag / h
+                    e2 = J @ ((xtmp - x).imag / h)
+                    eerr = la.norm(e1 - e2) / la.norm(e1)
 
-                if ftol <= eerr:
-                    print("Warning: Jacobian might not be accurate enough (eerr=%12e)" % eerr)
+                    if ftol <= eerr:
+                        print("Warning: Jacobian might not be accurate enough (eerr=%12e)" % eerr)
 
-            xp1 = x - self.solver(J)[0](residual, x0=None if k==0 else x-xp1)  # Time consuming.
+                xp1 = x - self.solver(J)[0](residual, x0=None if k==0 else x-xp1)  # Time consuming.
 
-            # How much has the solution changed? How close is f(x^{k+1}) to zero?
-            xp1mx = xp1 - x
-            
-            infodict['residual_x'].append(la.norm(xp1mx) / la.norm(xp1))
-            infodict['residual_f'].append(la.norm(residual) / la.norm(b))
-            
-            if self.solids:
-                fp1 = self.unpack(xp1)[3:]
-                for l, solid in enumerate(self.solids):
-                    infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[2*l]))
-                    infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[2*l+1]))
-                    
-            # Print (if verbose) the iteration count, residuals and forces
-            # on the immersed boundaries.
-            if verbose:
-                print(f"{k+1:4}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
+                # How much has the solution changed? How close is f(x^{k+1}) to zero?
+                xp1mx = xp1 - x
+                
+                infodict['residual_x'].append(la.norm(xp1mx) / la.norm(xp1))
+                infodict['residual_f'].append(la.norm(residual) / la.norm(b))
+                
+                if self.solids:
+                    fp1 = self.unpack(xp1)[3:]
+                    for l, solid in enumerate(self.solids):
+                        infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[2*l]))
+                        infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[2*l+1]))
+                        
+                # Print (if verbose) the iteration count, residuals and forces
+                # on the immersed boundaries.
+                if verbose:
+                    print(f"{k+1:4}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
-            x = xp1
+                x = xp1
 
-            # Refresh East boundary condition using average upstream the boundary.
-            # WARNING:
-            #     This may lead to diverging iterations if the boundary is not
-            #     sufficiently far downstream from the obstacle(s).
-            if outflowEast:
-                u, v = self.reshape(*self.unpack(x))[:2]
-                uBC[1][:], vBC[1][:] = np.mean(u[:, -5:], axis=1), np.mean(v[:, -5:], axis=1)
-                bc = self.boundary_condition_terms(uBC, vBC, *sBC)
+                # Refresh East boundary condition using average upstream the boundary.
+                # WARNING:
+                #     This may lead to diverging iterations if the boundary is not
+                #     sufficiently far downstream from the obstacle(s).
+                if outflowEast:
+                    u, v = self.reshape(*self.unpack(x))[:2]
+                    uBC[1][:], vBC[1][:] = np.mean(u[:, -5:], axis=1), np.mean(v[:, -5:], axis=1)
+                    bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
-            # If the tolerances are reached, stop iterating.
-            if infodict['residual_x'][-1] < xtol and infodict['residual_f'][-1] < ftol:
-                break
-        else:
-            if verbose:
-                print("Warning: maximum number of iterations reached (maxit=%d)" % maxit)
+                # If the tolerances are reached, stop iterating.
+                if infodict['residual_x'][-1] < xtol and infodict['residual_f'][-1] < ftol:
+                    break
+            else:
+                if verbose:
+                    print("Warning: maximum number of iterations reached (maxit=%d)" % maxit)
         except KeyboardInterrupt:
             print("Interrupting at iteration number", k)
             pass 
