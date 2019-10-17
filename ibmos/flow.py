@@ -53,7 +53,7 @@ class FieldInfo:
 
 @dataclass
 class Field:
-    """Fluid on a rectangular domain with Dirichlet boundary conditions.
+    """Fluid in a rectangular domain.
 
     Attributes
     ----------
@@ -61,6 +61,8 @@ class Field:
         x coordinates of the cell vertices.
     y : np.ndarray
         y coordinates of the cell vertices.
+    periodic : bool (default, False)
+        periodicity in the vertical direction
     xc : np.ndarray
         x coordinates of the cell centers.
     yc : np.ndarray
@@ -77,6 +79,8 @@ class Field:
     x: np.ndarray
     y: np.ndarray
 
+    periodic : bool = False
+
     xc: np.ndarray = field(init=False)
     yc: np.ndarray = field(init=False)
 
@@ -90,31 +94,51 @@ class Field:
         self.yc = 0.5 * (self.y[1:] + self.y[:-1])
 
         self.u = FieldInfo(self.x[1:-1], self.yc, np.diff(self.xc), np.diff(self.y))
-        self.v = FieldInfo(self.xc, self.y[1:-1], np.diff(self.x), np.diff(self.yc))
         self.p = FieldInfo(self.xc, self.yc, np.diff(self.x), np.diff(self.y))
+
+        # Periodicity in the VERTICAL direction
+        if not self.periodic:
+            self.v = FieldInfo(self.xc, self.y[1:-1], np.diff(self.x), np.diff(self.yc))
+        else:
+            yc_vS = (self.yc[0] - self.y[0]) + (self.y[-1] - self.yc[-1])
+            self.v = FieldInfo(self.xc, self.y[:-1], np.diff(self.x), np.r_[yc_vS, np.diff(self.yc)])
 
     def divergence(self):
         Ru = self.p.weight_height()
         Rv = self.p.weight_width()
 
         DUx, DUxW, DUxE = quad.op(self.x, self.yc, 'x')
-        DVy, DVyS, DVyN = quad.op(self.xc, self.y, 'y')
 
-        return [Ru @ DUx, [Ru @ DUxW, Ru @ DUxE]], [Rv @ DVy, [Rv @ DVyS, Rv @ DVyN]]
+        if not self.periodic:
+            DVy, DVyS, DVyN = quad.op(self.xc, self.y, 'y', periodic=False)
+            return [Ru @ DUx, [Ru @ DUxW, Ru @ DUxE]], [Rv @ DVy, [Rv @ DVyS, Rv @ DVyN]]
+        else:
+            DVy = quad.op(self.xc, self.y, 'y', periodic=True)
+            return [Ru @ DUx, [Ru @ DUxW, Ru @ DUxE]], [Rv @ DVy, []]
+
 
     def laplacian(self):
         Mu, Mv = self.u.weight_width(), self.v.weight_height()
         Ru, Rv = self.u.weight_height(), self.v.weight_width()
 
-        # First U
         DUxx, DUxxW, DUxxE = quad.op(self.x, self.yc, 'xx')
-        DUyy, DUyyS, DUyyN = quad.op(self.x[1:-1], np.r_[self.y[0], self.yc, self.y[-1]], 'yy')
-        Lu, Lu0 = Ru @ DUxx + Mu @ DUyy, [Ru @ DUxxW, Ru @ DUxxE, Mu @ DUyyS, Mu @ DUyyN]
 
-        # Then v
-        DVxx, DVxxW, DVxxE = quad.op(np.r_[self.x[0], self.xc, self.x[-1]], self.y[1:-1], 'xx')
-        DVyy, DVyyS, DVyyN = quad.op(self.xc, self.y, 'yy')
-        Lv, Lv0 = Mv @ DVxx + Rv @ DVyy, [Mv @ DVxxW, Mv @ DVxxE, Rv @ DVyyS, Rv @ DVyyN]
+        if not self.periodic:
+            yu = np.r_[self.y[0], self.yc, self.y[-1]]
+            DUyy, DUyyS, DUyyN = quad.op(self.x[1:-1], yu, 'yy')
+            Lu, Lu0 = Ru @ DUxx + Mu @ DUyy, [Ru @ DUxxW, Ru @ DUxxE, Mu @ DUyyS, Mu @ DUyyN]
+
+            DVxx, DVxxW, DVxxE = quad.op(np.r_[self.x[0], self.xc, self.x[-1]], self.y[1:-1], 'xx')
+            DVyy, DVyyS, DVyyN = quad.op(self.xc, self.y, 'yy')
+            Lv, Lv0 = Mv @ DVxx + Rv @ DVyy, [Mv @ DVxxW, Mv @ DVxxE, Rv @ DVyyS, Rv @ DVyyN]
+        else:
+            yu = np.r_[self.yc, self.y[-1] + (self.yc[0] - self.y[0])]
+            DUyy = quad.op(self.x[1:-1], yu, 'yy', periodic=True)
+            Lu, Lu0 = Ru @ DUxx + Mu @ DUyy, [Ru @ DUxxW, Ru @ DUxxE]
+
+            DVxx, DVxxW, DVxxE = quad.op(np.r_[self.x[0], self.xc, self.x[-1]], self.y[:-1], 'xx')
+            DVyy = quad.op(self.xc, self.y, 'yy', periodic=True)
+            Lv, Lv0 = Mv @ DVxx + Rv @ DVyy, [Mv @ DVxxW, Mv @ DVxxE]
 
         return [[Lu, Lu0], [Lv, Lv0]]
 
@@ -122,35 +146,61 @@ class Field:
         Mu, Mv = self.u.weight_width(), self.v.weight_height()
         Ru, Rv = self.u.weight_height(), self.v.weight_width()
 
-        uW, uE, uS, uN = uBC
-        vW, vE, vS, vN = vBC
-
         dx, dy = np.diff(self.x), np.diff(self.y)
 
-        u2 = np.hstack([uW[:, np.newaxis] ** 2, u ** 2, uE[:, np.newaxis] ** 2])
+        if not self.periodic:
+            uW, uE, uS, uN = uBC
+            vW, vE, vS, vN = vBC
 
-        Nu = dx[1:] * dx[:-1] / (dx[1:] + dx[:-1]) * \
-             ((u2[:, 2:] - u2[:, 1:-1]) / dx[1:] ** 2 + (u2[:, 1:-1] - u2[:, :-2]) / dx[:-1] ** 2)
+            u2 = np.hstack([uW[:, np.newaxis]**2, u**2, uE[:, np.newaxis]**2])
 
-        v2 = np.vstack([vS[np.newaxis, :] ** 2, v ** 2, vN[np.newaxis, :] ** 2])
+            Nu = dx[1:]*dx[:-1]/(dx[1:] + dx[:-1])*\
+                 ((u2[:, 2:] - u2[:, 1:-1])/dx[1:]**2 + (u2[:, 1:-1] - u2[:, :-2])/dx[:-1]**2)
 
-        Nv = dy[1:, np.newaxis] * dy[:-1, np.newaxis] / (dy[1:] + dy[:-1])[:, np.newaxis] * \
-             ((v2[2:, :] - v2[1:-1, :]) / dy[1:, np.newaxis] ** 2 +
-              (v2[1:-1, :] - v2[:-2, :]) / dy[:-1, np.newaxis] ** 2)
+            v2 = np.vstack([vS[np.newaxis, :]**2, v**2, vN[np.newaxis, :]**2])
 
-        uv = (u[1:, :] * dy[:-1, np.newaxis] + u[:-1, :] * dy[1:, np.newaxis]) / (dy[1:] + dy[:-1])[:, np.newaxis] * \
-             (v[:, 1:] * dx[:-1] + v[:, :-1] * dx[1:]) / (dx[1:] + dx[:-1])
+            Nv = dy[1:, np.newaxis]*dy[:-1, np.newaxis]/(dy[1:] + dy[:-1])[:, np.newaxis]*\
+                 ((v2[2:, :] - v2[1:-1, :])/dy[1:, np.newaxis]**2 +
+                  (v2[1:-1, :] - v2[:-2, :])/dy[:-1, np.newaxis]**2)
 
-        uvS = uS * (vS[1:] * dx[:-1] + vS[:-1] * dx[1:]) / (dx[:-1] + dx[1:])
-        uvN = uN * (vN[1:] * dx[:-1] + vN[:-1] * dx[1:]) / (dx[:-1] + dx[1:])
+            uv = (u[1:, :]*dy[:-1, np.newaxis] + u[:-1, :]*dy[1:, np.newaxis])/(dy[1:] + dy[:-1])[:, np.newaxis]*\
+                 (v[:, 1:]*dx[:-1] + v[:, :-1]*dx[1:])/(dx[1:] + dx[:-1])
 
-        uvW = vW * (uW[1:] * dy[:-1] + uW[:-1] * dy[1:]) / (dy[:-1] + dy[1:])
-        uvE = vE * (uE[1:] * dy[:-1] + uE[:-1] * dy[1:]) / (dy[:-1] + dy[1:])
+            uvS = uS*(vS[1:]*dx[:-1] + vS[:-1]*dx[1:])/(dx[:-1] + dx[1:])
+            uvN = uN*(vN[1:]*dx[:-1] + vN[:-1]*dx[1:])/(dx[:-1] + dx[1:])
 
-        Nu += np.diff(np.vstack([uvS, uv, uvN]), axis=0) / dy[:, np.newaxis]
-        Nv += np.diff(np.hstack([uvW[:, np.newaxis], uv, uvE[:, np.newaxis]]), axis=1) / dx
+            uvW = vW*(uW[1:]*dy[:-1] + uW[:-1]*dy[1:])/(dy[:-1] + dy[1:])
+            uvE = vE*(uE[1:]*dy[:-1] + uE[:-1]*dy[1:])/(dy[:-1] + dy[1:])
 
-        return Mu @ Ru @ Nu.ravel(), Mv @ Rv @ Nv.ravel()
+            Nu += np.diff(np.vstack([uvS, uv, uvN]), axis=0)/dy[:, np.newaxis]
+            Nv += np.diff(np.hstack([uvW[:, np.newaxis], uv, uvE[:, np.newaxis]]), axis=1)/dx
+        else:
+            uW, uE = uBC
+            vW, vE = vBC
+
+            u2 = np.hstack([uW[:, np.newaxis] ** 2, u ** 2, uE[:, np.newaxis] ** 2])
+
+            Nu = dx[1:]*dx[:-1]/(dx[1:] + dx[:-1])*\
+                 ((u2[:, 2:] - u2[:, 1:-1])/dx[1:]**2 + (u2[:, 1:-1] - u2[:, :-2])/dx[:-1]**2)
+
+            v2 = np.vstack([v[-1, :]**2, v**2, v[0, :]**2])
+
+            dyv = np.r_[dy[-1], dy]
+
+            Nv = dyv[1:, np.newaxis]*dyv[:-1, np.newaxis]/(dyv[1:] + dyv[:-1])[:, np.newaxis]*\
+                ((v2[2:, :] - v2[1:-1, :])/dyv[1:, np.newaxis]**2 +
+                 (v2[1:-1, :] - v2[:-2, :])/dyv[:-1, np.newaxis]**2)
+
+            uv = (u[:, :]*np.roll(dy, 1)[:, np.newaxis] + np.roll(u[:, :], 1, axis=0)*dy[:, np.newaxis]) / (np.roll(dy, 1) + dy)[:, np.newaxis] * \
+                 (v[:, 1:]*dx[:-1] + v[:, :-1]*dx[1:])/(dx[1:] + dx[:-1])
+
+            uvW = vW*(uW[:]*dyv[:-1] + np.r_[uW[-1], uW[:-1]]*dyv[1:])/(dyv[:-1] + dyv[1:])
+            uvE = vE*(uE[:]*dyv[:-1] + np.r_[uE[-1], uE[:-1]]*dyv[1:])/(dyv[:-1] + dyv[1:])
+
+            Nu += np.diff(np.vstack([uv, uv[0, :]]), axis=0)/dy[:, np.newaxis]
+            Nv += np.diff(np.hstack([uvW[:, np.newaxis], uv, uvE[:, np.newaxis]]), axis=1)/dx
+
+        return Mu@Ru@Nu.ravel(), Mv@Rv@Nv.ravel()
 
     def linearized_advection(self, u0, v0, u0BC, v0BC, test=True):
         n, m = self.p.shape
@@ -158,6 +208,9 @@ class Field:
 
         # Tiling width
         sw = 3
+
+        if self.periodic and (n%3)!=0:
+            raise ValueError ("In the periodic case, n must be divisible by 3: n=%d, n/3 = %f"%(n, n/3))
 
         # aux vectors for building the block matrices that form N
         # N = [Nuu, Nuv]
@@ -171,8 +224,12 @@ class Field:
         suu = [[0, -1], [0, 0], [0, 1], [-1, 0], [1, 0]]
         svv = [[0, -1], [0, 0], [0, 1], [-1, 0], [1, 0]]
 
-        svu = [[-1, 0], [-1, 1], [0, 0], [0, 1]]  # + [[1, 0], [1, 1]]
-        suv = [[1, -1], [0, -1], [0, 0], [1, 0]]  # + [[-1, -1], [-1, 0]]
+        if not self.periodic:
+            svu = [[-1, 0], [-1, 1], [0, 0], [0, 1]]
+            suv = [[1, -1], [0, -1], [0, 0], [1, 0]]
+        else:
+            svu = [[1, 0], [1, 1], [0, 0], [0, 1]]
+            suv = [[-1, -1], [0, -1], [0, 0], [-1, 0]]
 
         # obtain Nuu and Nvu
         for idxj in range(sw):
@@ -186,12 +243,20 @@ class Field:
                 uidx = -np.ones(u0.shape, dtype=int)
                 for suuk in suu:
                     jj, ii = idx[0] + suuk[0], idx[1] + suuk[1]
+                    if self.periodic:
+                        jj[jj == -1] = u0.shape[0] - 1
+                        jj[jj == u0.shape[0]] = 0
+
                     mask = (0 <= jj) * (jj < u0.shape[0]) * (0 <= ii) * (ii < u0.shape[1])
                     uidx[jj[mask], ii[mask]] = tmpidx[mask]
 
                 vidx = -np.ones(v0.shape, dtype=int)
                 for svuk in svu:
                     jj, ii = idx[0] + svuk[0], idx[1] + svuk[1]
+                    if self.periodic:
+                        jj[jj == -1] = u0.shape[0] - 1
+                        jj[jj == u0.shape[0]] = 0
+
                     mask = (0 <= jj) * (jj < v0.shape[0]) * (0 <= ii) * (ii < v0.shape[1])
                     vidx[jj[mask], ii[mask]] = tmpidx[mask]
 
@@ -220,12 +285,20 @@ class Field:
                 vidx = -np.ones(v0.shape, dtype=int)
                 for svvk in svv:
                     jj, ii = idx[0] + svvk[0], idx[1] + svvk[1]
+                    if self.periodic:
+                        jj[jj == -1] = u0.shape[0] - 1
+                        jj[jj == u0.shape[0]] = 0
+
                     mask = (0 <= jj) * (jj < v0.shape[0]) * (0 <= ii) * (ii < v0.shape[1])
                     vidx[jj[mask], ii[mask]] = tmpidx[mask]
 
                 uidx = -np.ones(u0.shape, dtype=int)
                 for suvk in suv:
                     jj, ii = idx[0] + suvk[0], idx[1] + suvk[1]
+                    if self.periodic:
+                        jj[jj == -1] = u0.shape[0] - 1
+                        jj[jj == u0.shape[0]] = 0
+
                     mask = (0 <= jj) * (jj < u0.shape[0]) * (0 <= ii) * (ii < u0.shape[1])
                     uidx[jj[mask], ii[mask]] = tmpidx[mask]
 

@@ -22,9 +22,11 @@ class Solver:
 
     field: Field
     solids: list = []
+    periodic: bool
     solver = None
 
-    def __init__(self, x, y, iRe=1.0, Co=0.5, fractionalStep=False, solver=solver_default(), *solids):
+    def __init__(self, x, y, iRe=1.0, Co=0.5, periodic=False,
+                 fractionalStep=False, solver=solver_default(), *solids):
         """Initialize solver.
 
         Parameters
@@ -37,15 +39,21 @@ class Solver:
             Inverse of the Reynolds number.
         Co : float, optional
             Courant number.
+        periodic : bool, optional
+            Periodicity in the y direction
         fractionalStep : bool, optional
             Fractional Step Method flag.
         solver : callable, optional
             `solver(A)` that returns linear solver.
         solids : list, optional
             List of solids. """
+    
+        # Store periodicity
+        self.periodic = periodic
 
         # Create field and determine smallest cell size.
-        self.fluid = Field(x, y)
+        self.fluid = Field(x, y, periodic)
+
         self.dxmin = np.min(np.r_[self.fluid.p.dx, self.fluid.p.dy])
 
         # Laplacian and divergence operators.
@@ -207,6 +215,7 @@ class Solver:
 
         Returns
         -------
+            return (uW, uE), (vW, vE)
         tuple:
             Propagator matrices.
 
@@ -303,11 +312,13 @@ class Solver:
         x0 : np.ndarray
             Initial guess (packed state-vector).
         uBC : list
-            List of np.ndarray vectors with the West, East, South and North
-            boundary conditions for the horizontal component.
+            List of np.ndarray vectors with the West, East, South and North 
+            boundary conditions for the horizontal velocity component.
+            Note: South and North ignored if periodic.
         vBC : list
             List of np.ndarray vectors with the West, East, South and North
-            boundary conditions.
+            boundary conditions for the vertical velocity component.
+            Note: South and North ignored if periodic.
         sBC : list, optional
             List of np.ndarray with the horizontal and vertical component of
             the velocity on the immersed boundaries.
@@ -515,68 +526,74 @@ class Solver:
 
 
         # Main loop.
-        for k in range(number):
-            infodict['t'][k] = (k+1)*self.dt
+        try:
+            for k in range(number):
+                infodict['t'][k] = (k+1)*self.dt
 
-            # Build right-hand-side.
-            # terms at current time step plus boundary conditions plus advection.
-            # And compute timestep
+                # Build right-hand-side.
+                # terms at current time step plus boundary conditions plus advection.
+                # And compute timestep
 
-            # Compute next time step. Time consuming part
-            if self.fractionalStep:
-                b = self.B[0] @ x[:self.pStart] + bc[:self.pStart]
-                b += -1.5 * N + 0.5 * Nm1
+                # Compute next time step. Time consuming part
+                if self.fractionalStep:
+                    b = self.B[0] @ x[:self.pStart] + bc[:self.pStart]
+                    b += -1.5 * N + 0.5 * Nm1
 
-                qast = self.iA[0](b, x0=None if k==0 else qast)
-                λ = self.iA[1](self.B[2]@qast - bc[self.pStart:], x0=None if k==0 else λ)
+                    qast = self.iA[0](b, x0=None if k==0 else qast)
+                    λ = self.iA[1](self.B[2]@qast - bc[self.pStart:], x0=None if k==0 else λ)
 
-                xp1 = np.r_[qast - self.B[1]@(self.B[2].T@λ), λ]
+                    xp1 = np.r_[qast - self.B[1]@(self.B[2].T@λ), λ]
 
-                if checkSolvers:
-                    infodict['rel.error(A)'][k] = la.norm(self.A[0]@qast - b)/la.norm(b)
-                    infodict['rel.error(C)'][k] = la.norm(self.A[1]@λ - self.B[2]@qast + bc[self.pStart:])/la.norm(self.B[2]@qast - bc[self.pStart:])
-            else:
-                b = self.B[0] @ x + bc
-                b[:self.pStart] += -1.5 * N + 0.5 * Nm1
-                xp1 = self.iA[0](b, x0=None if k==0 else xp1)
+                    if checkSolvers:
+                        infodict['rel.error(A)'][k] = la.norm(self.A[0]@qast - b)/la.norm(b)
+                        infodict['rel.error(C)'][k] = la.norm(self.A[1]@λ - self.B[2]@qast + bc[self.pStart:])/la.norm(self.B[2]@qast - bc[self.pStart:])
+                else:
+                    b = self.B[0] @ x + bc
+                    b[:self.pStart] += -1.5 * N + 0.5 * Nm1
+                    xp1 = self.iA[0](b, x0=None if k==0 else xp1)
 
-                if checkSolvers:
-                    infodict['rel.error(A)'][k] = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
+                    if checkSolvers:
+                        infodict['rel.error(A)'][k] = (la.norm(self.A[0]@xp1 - b)/la.norm(b))
 
-            infodict['x_2'][k] = la.norm(xp1)
-            infodict['dxdt_2'][k] = la.norm(xp1-x)/self.dt
+                infodict['x_2'][k] = la.norm(xp1)
+                infodict['dxdt_2'][k] = la.norm(xp1-x)/self.dt
 
-            if self.solids:
-                fp1 = self.unpack(xp1)[3:]
-                for l, solid in enumerate(self.solids):
-                    infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[2*l])
-                    infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[2*l+1])
+                if self.solids:
+                    fp1 = self.unpack(xp1)[3:]
+                    for l, solid in enumerate(self.solids):
+                        infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[2*l])
+                        infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[2*l+1])
 
-            if outflowEast:
-                u, v = self.reshape(*self.unpack(xp1))[:2]
-                
-                Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
-                infodict['Uinf@outlet'][k] = Uinf
-                dx = (self.fluid.x[-1]-self.fluid.x[-2])
-                uBC[1][:] = uBC[1][:] - Uinf*self.dt/dx*(uBC[1][:] - u[:,-1])
-                vBC[1][:] = vBC[1][:] - Uinf*self.dt/dx*(vBC[1][:] - v[:,-1])
-                bc = self.boundary_condition_terms(uBC, vBC, *sBC)
+                if outflowEast:
+                    u, v = self.reshape(*self.unpack(xp1))[:2]
 
-            # If reportEvery is not None, print current step, time, residuals and,
-            # if we have immersed boundaries, print also the forces.
-            if verbose and ((k + 1) % verbose == 0 or (k + 1) == number):
-                print(f"{k+1:8}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
+                    Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
+                    infodict['Uinf@outlet'][k] = Uinf
+                    dx = (self.fluid.x[-1]-self.fluid.x[-2])
+                    uBC[1][:] = uBC[1][:] - Uinf*self.dt/dx*(uBC[1][:] - u[:,-1])
+                    vBC[1][:] = vBC[1][:] - Uinf*self.dt/dx*(vBC[1][:] - v[:,-1])
+                    bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
-            # Prepare for the next time step
-            x = xp1
-            Nm1 = N
-            if k != number - 1:
-                N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+                # If reportEvery is not None, print current step, time, residuals and,
+                # if we have immersed boundaries, print also the forces.
+                if verbose and ((k + 1) % verbose == 0 or (k + 1) == number):
+                    print(f"{k+1:8}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
-            # Append vector to xres?
-            if (k + 1) % saveEvery == 0:
-                xres.append(x)
-                tres.append((k+1)*self.dt)
+                # Prepare for the next time step
+                x = xp1
+                Nm1 = N
+                if k != number - 1:
+                    N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+
+                # Append vector to xres?
+                if (k + 1) % saveEvery == 0:
+                    xres.append(x)
+                    tres.append((k+1)*self.dt)
+        except KeyboardInterrupt:
+            print("Interrupting at t =", k*self.dt)
+            xres.append(x)
+            tres.append(k*self.dt)
+            pass 
 
         # Return state vectors
         return np.squeeze(xres), np.squeeze(tres), infodict
@@ -618,14 +635,14 @@ class Solver:
     def zero_boundary_conditions(self):
         """Return zero boundary conditions."""
         uW, uE = np.zeros(self.fluid.u.shape[0]), np.zeros(self.fluid.u.shape[0])
-        uS, uN = np.zeros(self.fluid.u.shape[1]), np.zeros(self.fluid.u.shape[1])
-        uBC = (uW, uE, uS, uN)
-
         vW, vE = np.zeros(self.fluid.v.shape[0]), np.zeros(self.fluid.v.shape[0])
-        vS, vN = np.zeros(self.fluid.v.shape[1]), np.zeros(self.fluid.v.shape[1])
-        vBC = (vW, vE, vS, vN)
 
-        return uBC, vBC
+        if not self.periodic:
+            uS, uN = np.zeros(self.fluid.u.shape[1]), np.zeros(self.fluid.u.shape[1])
+            vS, vN = np.zeros(self.fluid.v.shape[1]), np.zeros(self.fluid.v.shape[1])
+            return (uW, uE, uS, uN), (vW, vE, vS, vN)
+        else:
+            return (uW, uE), (vW, vE)
 
     def zero(self):
         """Return zero state vector (packed).
@@ -766,16 +783,32 @@ class Solver:
 
         fig = plt.figure(figsize=figsize)
 
-        plots = ((self.fluid.u.x, self.fluid.u.y, u, 'u'),
-                 (self.fluid.v.x, self.fluid.v.y, v, 'v'),
-                 (self.fluid.p.x, self.fluid.p.y, p, 'p'))
+        if not self.periodic:
+            plots = ((self.fluid.u.x, self.fluid.u.y, u, 'u'),
+                     (self.fluid.v.x, self.fluid.v.y, v, 'v'),
+                     (self.fluid.p.x, self.fluid.p.y, p, 'p'))
+        else:
+            Ly = self.fluid.y[-1] - self.fluid.y[0]
+
+            yu = np.r_[self.fluid.u.y - Ly, self.fluid.u.y, self.fluid.u.y + Ly]
+            yv = np.r_[self.fluid.v.y - Ly, self.fluid.v.y, self.fluid.v.y + Ly]
+            yp = np.r_[self.fluid.p.y - Ly, self.fluid.p.y, self.fluid.p.y + Ly]
+
+            plots = ((self.fluid.u.x, yu, np.vstack([u,]*3), 'u'),
+                     (self.fluid.v.x, yv, np.vstack([v,]*3), 'v'),
+                     (self.fluid.p.x, yp, np.vstack([p,]*3), 'p'))
 
         for k, (x, y, f, fname) in enumerate(plots):
             plt.subplot(1, len(plots), k + 1)
             plt.title(fname)
             plt.pcolormesh(x, y, f, rasterized=True)
+
             for solid in self.solids:
                 plt.plot(solid.ξ, solid.η)
+                if self.periodic:
+                    plt.plot(solid.ξ, solid.η + Ly)
+                    plt.plot(solid.ξ, solid.η - Ly)
+
             if equal:
                 plt.axis('equal')
             if colorbar:
