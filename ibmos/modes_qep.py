@@ -5,7 +5,7 @@ from petsc4py import PETSc
 from slepc4py import SLEPc
 import numpy as np
 
-from stabfuncs import *
+from .stabfuncs import *
 
 Print = PETSc.Sys.Print
 

@@ -6,7 +6,7 @@ from slepc4py import SLEPc
 
 import numpy as np
 
-from stabfuncs import *
+from .stabfuncs import *
 
 opts = PETSc.Options()
 omega = opts.getScalar('omega').real
