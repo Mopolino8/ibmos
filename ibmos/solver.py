@@ -159,7 +159,7 @@ class Solver:
         self.cleanup()
 
 
-    def jacobian(self, uBC, vBC, u0=None, v0=None):
+    def jacobian(self, uBC=None, vBC=None, u0=None, v0=None):
         """Return Jacobian.
 
         Return Jacobian at `u0` and `v0`. If they are not provided, advection terms are
@@ -167,14 +167,14 @@ class Solver:
 
         Parameters
         ----------
-        u0 : np.ndarray, optional
-            Horizontal velocity component at the linearization point.
-        v0 : np.ndarray, optional
-            Vertical velocity component at the linearization point.
         uBC : list
             Boundary conditions on the horizontal velocity component (uW, uE, uS, uN).
         vBC : list
             Boundary conditions on the vertical velocity component (vW, vE, vS, vN).
+        u0 : np.ndarray, optional
+            Horizontal velocity component at the linearization point.
+        v0 : np.ndarray, optional
+            Vertical velocity component at the linearization point.
 
         Returns
         -------
@@ -215,9 +215,8 @@ class Solver:
 
         Returns
         -------
-            return (uW, uE), (vW, vE)
-        tuple:
-            Propagator matrices.
+            return tuple
+                Propagator matrices.
 
         """
         Mu, Mv = self.fluid.u.weight_width(), self.fluid.v.weight_height()
@@ -264,7 +263,7 @@ class Solver:
             return (AA,), (BB,)
 
 
-    def boundary_condition_terms(self, uBC, vBC, *sBC):
+    def boundary_condition_terms(self, uBC, vBC, uBCp1, vBCp1, *sBCp1):
         """Return contribution of the boundary terms to the right-hand-side.
 
         Parameters
@@ -272,33 +271,40 @@ class Solver:
         uBC : list
             List of np.ndarray vectors with the West, East, South and North
             boundary conditions for the horizontal component of the velocity
-            at the time level t+1.
+            at the current time.
         vBC : list
             List of np.ndarray vectors with the West, East, South and North
             boundary conditions for the vertical component of the velocity
-            at the time level t+1.
-        sBC : list, optional
+            at the current time.
+        uBCp1 : list
+            Same as uBC at the next time level.
+        vBCp1 : list
+            Same as vBC at the next time level.
+        sBCp1 : list, optional
             List of np.ndarray with the horizontal and vertical component of
-            the velocity on the immersed boundaries at the time level t+1.
+            the velocity on the immersed boundaries at the next time level.
 
         Returns
         -------
         np.ndarray
-            Contribution of the boundary terms to the right-hand-side of tue
-            governing equations..
+            Contribution of the boundary terms to the right-hand-side of the
+            governing equations.
 
         """
 
-        bu = np.sum([self.iRe * A @ x for A, x in zip(self.laplacian[0][1], uBC)], axis=0)
-        bv = np.sum([self.iRe * A @ x for A, x in zip(self.laplacian[1][1], vBC)], axis=0)
+        bu = np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[0][1], uBCp1)], axis=0)
+        bv = np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[1][1], vBCp1)], axis=0)
+
+        bu += np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[0][1], uBC)], axis=0)
+        bv += np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[1][1], vBC)], axis=0)
 
         # RHS terms for the divergence eq. except for the first cell (pressure set to zero)
-        bD = (np.sum([A @ x for A, x in zip(self.divergence[0][1], uBC[:2])], axis=0) +
-              np.sum([A @ x for A, x in zip(self.divergence[1][1], vBC[2:])], axis=0))[1:]
+        bD = (np.sum([A@x for A, x in zip(self.divergence[0][1], uBCp1[:2])], axis=0) +
+              np.sum([A@x for A, x in zip(self.divergence[1][1], vBCp1[2:])], axis=0))[1:]
 
         bc = [bu, bv, bD]
-        for sBCk in sBC:
-            bc.append(np.r_[sBCk])
+        for sBCp1k in sBCp1:
+            bc.append(np.r_[sBCp1k])
 
         return np.concatenate(bc)
 
@@ -346,7 +352,7 @@ class Solver:
         """
 
         # Contribution of the boundary conditions to the right-hand-side
-        bc = self.boundary_condition_terms(uBC, vBC, *sBC)
+        bc = self.boundary_condition_terms(uBC, vBC, uBC, vBC, *sBC)
         # Build Jacobian without advection terms.
         JnoAdv = self.jacobian(uBC, vBC)
 
@@ -445,7 +451,7 @@ class Solver:
         return x, infodict
 
 
-    def steps(self, x, uBC, vBC, sBC=(), outflowEast=False, number=1, saveEvery=None, 
+    def steps(self, x, fuBC, fvBC, fsBC=(), t0=0.0, outflowEast=False, number=1, saveEvery=None, 
               verbose=1, checkSolvers=False, Nm1=None):
         """Time-step the governing equations.
 
@@ -453,15 +459,15 @@ class Solver:
         ----------
         x : np.ndarray
             Initial condition (packed state-vector).
-        uBC : list
-            List of np.ndarray vectors with the West, East, South and North
-            boundary conditions for the horizontal component.
-        vBC : list
-            List of np.ndarray vectors with the West, East, South and North
-            boundary conditions.
-        sBC : list, optional
-            List of np.ndarray with the horizontal and vertical component of
-            the velocity on the immersed boundaries.
+        fuBC : list
+            List of functions of (x, t) and (y, t) for the West, East, South and North
+            boundary conditions for the horizontal component of the velocity field.
+        fvBC : list
+            List of functions of (x, t) and (y, t) for the West, East, South and North
+            boundary conditions for the vertical component of the velocity field.
+        fsBC : list, optional
+            List of functions of (ξ, η, t) for the horizontal and vertical 
+            component of the velocity on the immersed boundaries.
         outflowEast : bool, optional
             East boundary has outflow boundary condition. Note that uBC[1]
             and vBC[1] are updated every each iteration.
@@ -498,16 +504,15 @@ class Solver:
 
         xres, tres = [], []
 
+        uBC, vBC = self.eval_uvBC(t0, fuBC, fvBC)
+
         # Advection terms at the CURRENT time step.
         N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
 
         # If we were not provided with the advection terms at the PREVIOUS
-        # time step, we use the current ones.
+        # time step, we use the ones at t0.
         if not Nm1:
             Nm1 = N
-
-        # Contribution of the boundary conditions to the right-hand-side.
-        bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
         # Dictionary with output variables
         header = ['t', 'x_2', 'dxdt_2']
@@ -528,15 +533,21 @@ class Solver:
         if verbose:
             print("       k", "".join((f'{elem:>12} ' for elem in header)))
 
-
         # Main loop.
         try:
             for k in range(number):
-                infodict['t'][k] = (k+1)*self.dt
+                t = t0 + (k+1)*self.dt
+                infodict['t'][k] = t
 
-                # Build right-hand-side.
-                # terms at current time step plus boundary conditions plus advection.
-                # And compute timestep
+                uBCp1, vBCp1 = self.eval_uvBC(t, fuBC, fvBC)
+                sBCp1 = self.eval_sBC(t, fsBC)
+
+                # if east boundary is an outflow, use convective outflow
+                if outflowEast:
+                    uBCp1[1], vBCp1[1] = uBC[1], vBC[1]
+
+                # Contribution of the boundary conditions to the right-hand-side.
+                bc = self.boundary_condition_terms(uBC, vBC, uBCp1, vBCp1, *sBCp1)
 
                 # Compute next time step. Time consuming part
                 if self.fractionalStep:
@@ -574,9 +585,8 @@ class Solver:
                     Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
                     infodict['Uinf@outlet'][k] = Uinf
                     dx = (self.fluid.x[-1]-self.fluid.x[-2])
-                    uBC[1][:] = uBC[1][:] - Uinf*self.dt/dx*(uBC[1][:] - u[:,-1])
-                    vBC[1][:] = vBC[1][:] - Uinf*self.dt/dx*(vBC[1][:] - v[:,-1])
-                    bc = self.boundary_condition_terms(uBC, vBC, *sBC)
+                    uBCp1[1][:] = uBC[1][:] - Uinf*self.dt/dx*(uBC[1][:] - u[:,-1])
+                    vBCp1[1][:] = vBC[1][:] - Uinf*self.dt/dx*(vBC[1][:] - v[:,-1])
 
                 # If reportEvery is not None, print current step, time, residuals and,
                 # if we have immersed boundaries, print also the forces.
@@ -586,6 +596,8 @@ class Solver:
                 # Prepare for the next time step
                 x = xp1
                 Nm1 = N
+                uBC, vBC = uBCp1, vBCp1
+
                 if k != number - 1:
                     N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
 
@@ -594,9 +606,9 @@ class Solver:
                     xres.append(x)
                     tres.append((k+1)*self.dt)
         except KeyboardInterrupt:
-            print("Interrupting at t =", k*self.dt)
+            print("Interrupting at t =", t0 + k*self.dt)
             xres.append(x)
-            tres.append(k*self.dt)
+            tres.append(t0 + k*self.dt)
             pass 
 
         # Return state vectors
@@ -647,6 +659,22 @@ class Solver:
             return (uW, uE, uS, uN), (vW, vE, vS, vN)
         else:
             return (uW, uE), (vW, vE)
+
+    def eval_uvBC(self, t, fuBC, fvBC):
+        """ Auxiliary function to eval boundary conditions of the velocity field. """
+        _uBC = [fuBC[k](self.fluid.u.y, t) for k in range(2)]
+        _vBC = [fvBC[k](self.fluid.v.y, t) for k in range(2)]
+        if not self.periodic:
+            _uBC += [fuBC[k](self.fluid.u.x, t) for k in range(2, 4)]
+            _vBC += [fvBC[k](self.fluid.v.x, t) for k in range(2, 4)]
+        return _uBC, _vBC
+
+    def eval_sBC(self, t, fsBC):
+        """ Auxiliary function to eval boundary conditions on the immersed bodies """
+        _sBC=[]
+        for sBCk, solidk in zip(fsBC, self.solids):
+            _sBC.append((sBCk[0](solidk.ξ, solidk.η, t), sBCk[1](solidk.ξ, solidk.η, t)))
+        return _sBC
 
     def zero(self):
         """Return zero state vector (packed).
