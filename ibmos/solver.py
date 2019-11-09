@@ -791,7 +791,8 @@ class Solver:
         if ylim:
             plt.ylim(*ylim)
 
-    def plot_field(self, x, colorbar=False, equal=True, figsize=(8, 3), xlim=(), ylim=()):
+    def plot_field(self, x, colorbar=False, equal=True, repeat=False, 
+                    figsize=(8, 3), xlim=(), ylim=()):
         """Plot field.
 
         Parameters
@@ -802,6 +803,8 @@ class Solver:
             Display colorbar.
         equal: bool, optional
             Use equal axes.
+        repeat: bool, optional
+            Repeat if the flow field is periodic.
         figsize: optional, tuple
             Size of the figure.
         xlim: optional, tuple
@@ -815,7 +818,7 @@ class Solver:
 
         fig = plt.figure(figsize=figsize)
 
-        if not self.periodic:
+        if not self.periodic or not repeat:
             plots = ((self.fluid.u.x, self.fluid.u.y, u, 'u'),
                      (self.fluid.v.x, self.fluid.v.y, v, 'v'),
                      (self.fluid.p.x, self.fluid.p.y, p, 'p'))
@@ -837,7 +840,7 @@ class Solver:
 
             for solid in self.solids:
                 plt.plot(solid.ξ, solid.η)
-                if self.periodic:
+                if self.periodic and repeat:
                     plt.plot(solid.ξ, solid.η + Ly)
                     plt.plot(solid.ξ, solid.η - Ly)
 
