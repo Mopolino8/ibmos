@@ -23,9 +23,10 @@ class Solver:
     field: Field
     solids: list = []
     periodic: bool
+    advection: bool
     solver = None
 
-    def __init__(self, x, y, iRe=1.0, Co=0.5, periodic=False,
+    def __init__(self, x, y, iRe=1.0, Co=0.5, periodic=False, advection=True,
                  fractionalStep=False, solver=solver_default(), *solids):
         """Initialize solver.
 
@@ -41,6 +42,8 @@ class Solver:
             Courant number.
         periodic : bool, optional
             Periodicity in the y direction
+        advection : bool, optional
+            Enable or disable advection terms
         fractionalStep : bool, optional
             Fractional Step Method flag.
         solver : callable, optional
@@ -68,6 +71,7 @@ class Solver:
         self.pEnd = self.pStart + self.fluid.p.size - 1  # First value not included
         
         # Set parameters
+        self.set_advection(advection)
         self.set_iRe(iRe)
         self.set_Co(Co)
         self.set_fractional_step(fractionalStep)
@@ -80,7 +84,21 @@ class Solver:
         
         self.A, self.B, self.iA = None, None, None
         self.stepsInitialized = False
+
+
+    def set_advection(self, advection):
+        """Enable or disable advection terms.
         
+        Parameters
+        ----------
+        advection : bool
+            Advection terms (true) or not (false).
+            
+        """
+        self.advection = advection
+        self.cleanup()
+        
+
     def set_iRe(self, iRe):
         """Set inverse of the Reynolds number.
         
@@ -103,7 +121,11 @@ class Solver:
             Courant number.
         """
         
-        self.dt = Co * min(self.dxmin ** 2 / self.iRe, self.dxmin)
+        if self.advection:
+            self.dt = Co * min(self.dxmin**2/self.iRe, self.dxmin)
+        else:
+            self.dt = Co * self.dxmin**2/self.iRe
+
         self.cleanup()
 
 
@@ -162,8 +184,8 @@ class Solver:
     def jacobian(self, uBC=None, vBC=None, u0=None, v0=None):
         """Return Jacobian.
 
-        Return Jacobian at `u0` and `v0`. If they are not provided, advection terms are
-        not included.
+        Return Jacobian at `u0` and `v0`. If they are not provided or the `advection`
+        attribute is False, advection terms are not included.
 
         Parameters
         ----------
@@ -198,8 +220,9 @@ class Solver:
 
         Z = sp.coo_matrix((Q.shape[0],) * 2)
 
-        # If u0 and v0 are provided, the Jacobian includes advection terms.
-        if u0 is not None and v0 is not None:
+        # If u0 and v0 are provided and self.advection is True, 
+        # the Jacobian includes advection terms.
+        if u0 is not None and v0 is not None and self.advection:
             N = self.fluid.linearized_advection(u0, v0, uBC, vBC)
             J = sp.bmat([[-self.iRe * L + N, Q.T], [Q, Z]]).tocsr()
         else:
@@ -379,7 +402,8 @@ class Solver:
                 b = bc.copy()
 
                 u0, v0 = self.reshape(*self.unpack(x))[:2]
-                b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
+                if self.advection:
+                    b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
 
                 # Compute residual vector
                 residual = JnoAdv @ x - b
@@ -393,9 +417,10 @@ class Solver:
                     xtmp = x + 1j * h * np.random.random(x.shape)
 
                     btmp = np.asarray(bc, dtype=xtmp.dtype)
-                    u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
-
-                    btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
+                    
+                    if self.advection:
+                        u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
+                        btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
 
                     residualtmp = JnoAdv @ xtmp - btmp
 
@@ -419,13 +444,16 @@ class Solver:
                     for l, solid in enumerate(self.solids):
                         infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[2*l]))
                         infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[2*l+1]))
-                        
+
+                x = xp1
+
                 # Print (if verbose) the iteration count, residuals and forces
                 # on the immersed boundaries.
                 if verbose:
                     print(f"{k+1:4}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
-                x = xp1
+                if not self.advection:
+                    break
 
                 # Refresh East boundary condition using average upstream the boundary.
                 # WARNING:
@@ -507,7 +535,10 @@ class Solver:
         uBC, vBC = self.eval_uvBC(t0, fuBC, fvBC)
 
         # Advection terms at the CURRENT time step.
-        N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+        if self.advection:
+            N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+        else:
+            N = 0
 
         # If we were not provided with the advection terms at the PREVIOUS
         # time step, we use the ones at t0.
@@ -579,7 +610,7 @@ class Solver:
                         infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[2*l])
                         infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[2*l+1])
 
-                if outflowEast:
+                if outflowEast and self.advection:
                     u, v = self.reshape(*self.unpack(xp1))[:2]
 
                     Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
@@ -598,7 +629,7 @@ class Solver:
                 Nm1 = N
                 uBC, vBC = uBCp1, vBCp1
 
-                if k != number - 1:
+                if k != number - 1 and self.advection:
                     N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
 
                 # Append vector to xres?
