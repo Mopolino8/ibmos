@@ -428,7 +428,7 @@ def dirichlet_kernel_equispaced(x, n):
         Value of the Dirichlet kernel at x
 
     """ 
-    D = np.sinc(N*x/2)/np.sinc(x/2)*(1 if N%2 else np.cos(np.pi*x/2))
+    D = np.sinc(n*x/2)/np.sinc(x/2)*(1 if n%2 else np.cos(np.pi*x/2))
     return D
 
 def interpolation_matrix(xi, xj, kernel=dirichlet_kernel_equispaced):
@@ -453,4 +453,4 @@ def interpolation_matrix(xi, xj, kernel=dirichlet_kernel_equispaced):
     n = len(xj)
     scale = (xj[1]-xj[0])*n/2
     S = kernel((xi[:, np.newaxis]-xj[np.newaxis, :])/scale, n)
-    return 
+    return S
