@@ -13,15 +13,17 @@ def cylinder(name, x, y, r, ds, δ=defaultFunction, n=defaultNumPoints):
     return solid
 
 
-def superellipse(name, x, y, a, b, m, ds, δ=defaultFunction, n=defaultNumPoints):
+def superellipse(name, x, y, a, b, m, ds, α=0, ϵ=0, δ=defaultFunction, n=defaultNumPoints):
     t = np.linspace(0, 2 * np.pi, int(4 * np.pi * (a + b) / ds))
     _ξ = x + a * np.abs(np.cos(t)) ** (2 / m) * np.sign(np.cos(t))
-    _η = y + b * np.abs(np.sin(t)) ** (2 / m) * np.sign(np.sin(t))
+    _η = y + (b * np.abs(np.sin(t)) ** (2 / m) * np.sign(np.sin(t)) + ϵ*2*a*(1-((_ξ-x)/a)**2))
     _s = np.r_[0, np.cumsum(np.sqrt(np.diff(_ξ) ** 2 + np.diff(_η) ** 2))]
 
     l = int(_s[-1] / ds) + 1
     s = _s[-1] * np.r_[:l] / l
     ξ, η = (interp1d(_s, f, kind='cubic')(s) for f in (_ξ, _η))
+    
+    ξ, η = x + (ξ-x)*np.cos(α) - (η-y-ϵ*2*a)*np.sin(α), y + ϵ*2*a + (ξ-x)*np.sin(α) + (η-y-ϵ*2*a)*np.cos(α)
 
     solid = Solid(name, ξ, η, _s[-1] * np.ones(l) / l, δ, n)
 

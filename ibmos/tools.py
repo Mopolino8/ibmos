@@ -1,6 +1,7 @@
 import functools
 import numpy as np
 from scipy.special import erf
+import scipy.sparse as sp
 
 
 def solver_pardiso(A):
@@ -256,3 +257,191 @@ def stretching(n, dn0, dn1, ns, ws=12, we=12, maxs=0.04):
         f[k] = f[k - 1] + f_[k]
 
     return f
+
+def perm_from_colors(colors):
+    """ Return permutation indices from colors (ascending order).
+
+    Parameters
+    ----------
+    colors : np.ndarray
+        Colors.
+
+    Returns
+    -------
+    perm: np.ndarray
+        Permutation.
+
+    """ 
+
+    idx = np.arange(len(colors))
+    perm = np.concatenate([idx[color == colors] for color in np.unique(colors)])
+
+    return perm
+
+def mat_from_perm(perm):
+    """ Return permutation matrix from permutation indices.
+
+    Parameters
+    ----------
+    perm : np.ndarray
+        Permutation indices.
+
+    Returns
+    -------
+    P: np.ndarray
+        Permutation matrix.
+
+    """ 
+
+    return sp.eye(len(perm), dtype=int).tocsr()[perm, :]
+
+def iperm(perm):
+    """ Return inverse permutation indices.
+
+    Parameters
+    ----------
+    perm : np.ndarray
+        Permutation indices.
+
+    Returns
+    -------
+    iperm: np.ndarray
+        Inverse permutation indices.
+
+    """ 
+    iperm = np.empty_like(perm)
+    iperm[perm] = np.arange(perm.size)
+
+    return iperm
+
+def submat_from_colors(M, ci, cj, colorsi, colorsj=None):
+    """ Return matrix from colored rows and columns.
+
+    Parameters
+    ----------
+    M : matrix
+        Matrix operator.
+    ci : int
+        Row color.
+    cj : int
+        Column color.
+    colorsi : np.ndarray
+        Row coloring.
+    colorsj : np.ndarray, optional
+        Column color (defaults to colorsi).
+
+    Returns
+    -------
+    Mij: matrix
+        Submatrix Mij.
+
+    """ 
+    if colorsj is None:
+        colorsj = colorsi
+        
+    return M[colorsi==ci, :][:, colorsj==cj].tocsr()
+
+def submats_from_colors(M, colorsi, colorsj=None):
+    """ Divide matrix into submatrices according to coloring.
+
+    Parameters
+    ----------
+    M : matrix
+        Matrix.
+    colorsi : np.ndarray
+        Row coloring.
+    colorsj : np.ndarray, optional
+        Column color (defaults to colorsi).
+
+    Returns
+    -------
+    Mc: list
+        List of list of matrices.
+
+    """ 
+
+    if colorsj is None:
+        colorsj = colorsi
+
+    ucolorsi = np.unique(colorsi)
+    ucolorsj = np.unique(colorsj)
+
+    Mc =[ [submat_from_colors(M, ci, cj, colorsi, colorsj) for cj in ucolorsj] for ci in ucolorsi]
+
+    return Mc
+
+def subvec_from_colors(v, ci, colors):
+    """ Return vector from color.
+
+    Parameters
+    ----------
+    v : np.ndarray
+        Vector.
+    ci : int
+        Row color.
+    colors : np.ndarray
+        Row coloring.
+
+    Returns
+    -------
+    vc: np.ndarray
+        Vector.
+
+    """ 
+    return v[colors==ci]
+
+def subvecs_from_colors(v, colors):
+    """ Divide vector into subvectors according to coloring.
+
+    Parameters
+    ----------
+    v : np.ndarray
+        Vector.
+    colors : np.ndarray
+        Row coloring.
+
+    Returns
+    -------
+    vc: list
+        List of vectors.
+
+    """ 
+
+    unique_colors = np.unique(colors)
+    vc = [subvec_from_colors(v, colors, ci) for ci in unique_colors]
+
+    return vc
+
+def interpolation_matrix(xi, xj):
+    """Return interpolation matrix from xj to xi.
+
+    Parameters
+    ----------
+    xi : np.ndarray
+        Destination
+    xj : np.ndarray
+        Origin.
+    kernel : function, optional
+        Interpolation kernel f(x, n)
+
+    Returns
+    -------
+    S: np.ndarray
+        interpolation matrix
+
+    """
+    n = len(xj) - 1
+    Mpμ = (n-1)//2 + 1 if n%2 else n//2
+    scale = 2*np.pi*n/(n+1)/(xj[-1]-xj[0])
+
+    x = (xi[:, np.newaxis]-xj[np.newaxis, :])*scale
+
+    cm1 = 1-np.cos(x)
+    tol = np.sqrt(np.finfo(float).eps)
+
+    S = np.empty_like(x)
+
+    S[cm1>tol] = (np.cos(x[cm1>tol]*(Mpμ-1)) - np.cos(x[cm1>tol]*Mpμ))/(1-np.cos(x[cm1>tol]))/(n+1)
+    S[cm1<=tol] = (2*Mpμ - 1)/(n+1)
+
+    return S

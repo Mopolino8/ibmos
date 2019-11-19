@@ -23,10 +23,11 @@ class Solver:
     field: Field
     solids: list = []
     periodic: bool
+    advection: bool
     solver = None
 
-    def __init__(self, x, y, iRe=1.0, Co=0.5, periodic=False,
-                 fractionalStep=False, solver=solver_default(), *solids):
+    def __init__(self, x, y, *solids, iRe=1.0, Co=0.5, periodic=False, advection=True,
+                 fractionalStep=False, pZero=0, solver=solver_default()):
         """Initialize solver.
 
         Parameters
@@ -35,18 +36,23 @@ class Solver:
             Coordinates of the vertices (x direction).
         y : np.array
             Coordinates of the vertices (y direction).
+        solids : list, optional
+            List of solids. 
         iRe : float, optional
             Inverse of the Reynolds number.
         Co : float, optional
             Courant number.
         periodic : bool, optional
             Periodicity in the y direction
+        advection : bool, optional
+            Enable or disable advection terms
         fractionalStep : bool, optional
             Fractional Step Method flag.
+        pZero : int, optional
+            index of the point where pressure is pinned to zero.
         solver : callable, optional
             `solver(A)` that returns linear solver.
-        solids : list, optional
-            List of solids. """
+        """
     
         # Store periodicity
         self.periodic = periodic
@@ -63,24 +69,55 @@ class Solver:
         # The state vector is formed by stacking u, v, p and if we have
         # solids, also by (fx, fy) as many times as the number of solids.
         # pStart points to the first pressure value in this state vector
-        # pEnd points to the first value after the last pressure value.
+        self.vStart = self.fluid.u.size
         self.pStart = self.fluid.u.size + self.fluid.v.size
-        self.pEnd = self.pStart + self.fluid.p.size - 1  # First value not included
         
         # Set parameters
+        self.set_pZero(pZero)
+
+        self.set_advection(advection)
         self.set_iRe(iRe)
         self.set_Co(Co)
         self.set_fractional_step(fractionalStep)
         self.set_solver(solver)
-        
+
         self.set_solids(*solids)
+
+
+    def set_pZero(self, pZero = 0):
+        """ Select zero pressure point.
+
+        Parameters
+        ----------
+        pZero : int or None
+            Index of the cell where the pressure is pinned to zero."""
+
+        self.pZero = pZero
+        self.pEnd = self.pStart + self.fluid.p.size - (0 if pZero is None else 1)
+
+        self.cleanup()
+
         
     def cleanup(self):
         """Clean-up structures that must be recomputed after calls to set_*."""
         
         self.A, self.B, self.iA = None, None, None
         self.stepsInitialized = False
+
+
+    def set_advection(self, advection):
+        """Enable or disable advection terms.
         
+        Parameters
+        ----------
+        advection : bool
+            Advection terms (true) or not (false).
+            
+        """
+        self.advection = advection
+        self.cleanup()
+        
+
     def set_iRe(self, iRe):
         """Set inverse of the Reynolds number.
         
@@ -103,7 +140,11 @@ class Solver:
             Courant number.
         """
         
-        self.dt = Co * min(self.dxmin ** 2 / self.iRe, self.dxmin)
+        if self.advection:
+            self.dt = Co * min(self.dxmin**2/self.iRe, self.dxmin)
+        else:
+            self.dt = Co * self.dxmin**2/self.iRe
+
         self.cleanup()
 
 
@@ -162,8 +203,8 @@ class Solver:
     def jacobian(self, uBC=None, vBC=None, u0=None, v0=None):
         """Return Jacobian.
 
-        Return Jacobian at `u0` and `v0`. If they are not provided, advection terms are
-        not included.
+        Return Jacobian at `u0` and `v0`. If they are not provided or the `advection`
+        attribute is False, advection terms are not included.
 
         Parameters
         ----------
@@ -188,8 +229,9 @@ class Solver:
         # immersed boundaries (if needed).
         Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]), format='csr') ]
 
-        # Suppress first row -> set value of the pressure to zero at the first node.
-        Q[0] = Q[0][1:, :]
+        # Suppress pZero-th row -> set value of the pressure to zero at the pZero-th node.
+        if self.pZero is not None:
+            Q[0] = sp.vstack([Q[0][:self.pZero, :], Q[0][self.pZero + 1:, :]])
 
         if self.solids:
             for Eu, Ev in self.E:
@@ -198,8 +240,9 @@ class Solver:
 
         Z = sp.coo_matrix((Q.shape[0],) * 2)
 
-        # If u0 and v0 are provided, the Jacobian includes advection terms.
-        if u0 is not None and v0 is not None:
+        # If u0 and v0 are provided and self.advection is True, 
+        # the Jacobian includes advection terms.
+        if u0 is not None and v0 is not None and self.advection:
             N = self.fluid.linearized_advection(u0, v0, uBC, vBC)
             J = sp.bmat([[-self.iRe * L + N, Q.T], [Q, Z]]).tocsr()
         else:
@@ -232,8 +275,9 @@ class Solver:
         # immersed boundaries (if needed).
         Q = [-sp.hstack((self.divergence[0][0], self.divergence[1][0]), format='csr')]
 
-        # Suppress first row -> set value of the pressure to zero at the first node.
-        Q[0] = Q[0][1:, :]
+        # Suppress pZero-th row -> set value of the pressure to zero at the pZero-th node.
+        if self.pZero is not None:
+            Q[0] = sp.vstack([Q[0][:self.pZero, :], Q[0][self.pZero + 1:, :]])
 
         if self.solids:
             for Eu, Ev in self.E:
@@ -256,11 +300,11 @@ class Solver:
 
             QBNQT = (Q @ (BN @ Q.T)).tocsc()
 
-            return (A, QBNQT), (B, BN, Q)
+            return [A, QBNQT], [B, BN, Q]
         else:
             AA = sp.bmat([[A, Q.T], [Q, Z]]).tocsc()
 
-            return (AA,), (BB,)
+            return [AA,], [BB,]
 
 
     def boundary_condition_terms(self, uBC, vBC, uBCp1, vBCp1, *sBCp1):
@@ -298,9 +342,13 @@ class Solver:
         bu += np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[0][1], uBC)], axis=0)
         bv += np.sum([0.5*self.iRe*A@x for A, x in zip(self.laplacian[1][1], vBC)], axis=0)
 
-        # RHS terms for the divergence eq. except for the first cell (pressure set to zero)
+        # RHS terms for the divergence
         bD = (np.sum([A@x for A, x in zip(self.divergence[0][1], uBCp1[:2])], axis=0) +
-              np.sum([A@x for A, x in zip(self.divergence[1][1], vBCp1[2:])], axis=0))[1:]
+              np.sum([A@x for A, x in zip(self.divergence[1][1], vBCp1[2:])], axis=0))
+
+        if self.pZero is not None:
+            # Remove term for the pZero-th cell (pressure set to zero)
+            bD = np.r_[bD[:self.pZero], bD[self.pZero + 1:]]
 
         bc = [bu, bv, bD]
         for sBCp1k in sBCp1:
@@ -378,8 +426,9 @@ class Solver:
                 # Build right-hand-side vector: bc + advection terms.
                 b = bc.copy()
 
-                u0, v0 = self.reshape(*self.unpack(x))[:2]
-                b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
+                u0, v0 = self.reshape(self.unpack(x), p0=0)[:2]
+                if self.advection:
+                    b[:self.pStart] -= np.r_[self.fluid.advection(u0, v0, uBC, vBC)]
 
                 # Compute residual vector
                 residual = JnoAdv @ x - b
@@ -393,9 +442,10 @@ class Solver:
                     xtmp = x + 1j * h * np.random.random(x.shape)
 
                     btmp = np.asarray(bc, dtype=xtmp.dtype)
-                    u0tmp, v0tmp = self.reshape(*self.unpack(xtmp))[:2]
-
-                    btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
+                    
+                    if self.advection:
+                        u0tmp, v0tmp = self.reshape(self.unpack(xtmp), p0=0)[:2]
+                        btmp[:self.pStart] -= np.r_[self.fluid.advection(u0tmp, v0tmp, uBC, vBC)]
 
                     residualtmp = JnoAdv @ xtmp - btmp
 
@@ -417,22 +467,25 @@ class Solver:
                 if self.solids:
                     fp1 = self.unpack(xp1)[3:]
                     for l, solid in enumerate(self.solids):
-                        infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[2*l]))
-                        infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[2*l+1]))
-                        
+                        infodict[f'{solid.name}_fx'].append(2*np.sum(fp1[l][0]))
+                        infodict[f'{solid.name}_fy'].append(2*np.sum(fp1[l][1]))
+
+                x = xp1
+
                 # Print (if verbose) the iteration count, residuals and forces
                 # on the immersed boundaries.
                 if verbose:
                     print(f"{k+1:4}", "".join((f'{infodict[elem][k]: 12.5e} ' for elem in header)))
 
-                x = xp1
+                if not self.advection:
+                    break
 
                 # Refresh East boundary condition using average upstream the boundary.
                 # WARNING:
                 #     This may lead to diverging iterations if the boundary is not
                 #     sufficiently far downstream from the obstacle(s).
                 if outflowEast:
-                    u, v = self.reshape(*self.unpack(x))[:2]
+                    u, v = self.reshape(self.unpack(x), p0=0)[:2]
                     uBC[1][:], vBC[1][:] = np.mean(u[:, -5:], axis=1), np.mean(v[:, -5:], axis=1)
                     bc = self.boundary_condition_terms(uBC, vBC, *sBC)
 
@@ -468,6 +521,8 @@ class Solver:
         fsBC : list, optional
             List of functions of (ξ, η, t) for the horizontal and vertical 
             component of the velocity on the immersed boundaries.
+        t0 : float, optional
+            Initial time.
         outflowEast : bool, optional
             East boundary has outflow boundary condition. Note that uBC[1]
             and vBC[1] are updated every each iteration.
@@ -495,9 +550,13 @@ class Solver:
 
         """
         if not self.stepsInitialized:
+            if verbose:
+                print("Initializing solver...", end="")
             self.A, self.B = self.propagator(self.fractionalStep)
             self.iA = [self.solver(Ak)[0] for Ak in self.A]
             self.stepsInitialized = True
+            if verbose:
+                print("done.")
 
         if saveEvery is None:
             saveEvery = number
@@ -507,7 +566,10 @@ class Solver:
         uBC, vBC = self.eval_uvBC(t0, fuBC, fvBC)
 
         # Advection terms at the CURRENT time step.
-        N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+        if self.advection:
+            N = np.r_[self.fluid.advection(*self.reshape(self.unpack(x), p0=0)[:2], uBC, vBC)]
+        else:
+            N = 0
 
         # If we were not provided with the advection terms at the PREVIOUS
         # time step, we use the ones at t0.
@@ -576,11 +638,11 @@ class Solver:
                 if self.solids:
                     fp1 = self.unpack(xp1)[3:]
                     for l, solid in enumerate(self.solids):
-                        infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[2*l])
-                        infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[2*l+1])
+                        infodict[f'{solid.name}_fx'][k] = 2*np.sum(fp1[l][0])
+                        infodict[f'{solid.name}_fy'][k] = 2*np.sum(fp1[l][1])
 
-                if outflowEast:
-                    u, v = self.reshape(*self.unpack(xp1))[:2]
+                if outflowEast and self.advection:
+                    u, v = self.reshape(self.unpack(xp1), p0=0)[:2]
 
                     Uinf = np.sum(self.fluid.u.dy*u[:,-1])/(self.fluid.y[-1]-self.fluid.y[0])
                     infodict['Uinf@outlet'][k] = Uinf
@@ -598,18 +660,21 @@ class Solver:
                 Nm1 = N
                 uBC, vBC = uBCp1, vBCp1
 
-                if k != number - 1:
-                    N = np.r_[self.fluid.advection(*self.reshape(*self.unpack(x))[:2], uBC, vBC)]
+                if k != number - 1 and self.advection:
+                    N = np.r_[self.fluid.advection(*self.reshape(self.unpack(x), p0=0)[:2], uBC, vBC)]
 
                 # Append vector to xres?
                 if (k + 1) % saveEvery == 0:
                     xres.append(x)
                     tres.append((k+1)*self.dt)
         except KeyboardInterrupt:
-            print("Interrupting at t =", t0 + k*self.dt)
+            print("KeyboardInterrupt at t =", t0 + k*self.dt)
             xres.append(x)
             tres.append(t0 + k*self.dt)
-            pass 
+        except ValueError:
+            print("ValueError at t =", t0 + k*self.dt)
+            xres.append(x)
+            tres.append(t0 + k*self.dt)
 
         # Return state vectors
         return np.squeeze(xres), np.squeeze(tres), infodict
@@ -640,7 +705,9 @@ class Solver:
             (u.size, v.size, p.size, [(l1, l1), (l2, l2), ...])
 
         """
-        sizes = [self.fluid.u.size, self.fluid.v.size, self.fluid.p.size - 1]
+        sizes = [self.fluid.u.size, 
+                 self.fluid.v.size, 
+                 self.fluid.p.size - (0 if self.pZero is None else 1)]
 
         if self.solids:
             for solid in self.solids:
@@ -676,8 +743,13 @@ class Solver:
             _sBC.append((sBCk[0](solidk.ξ, solidk.η, t), sBCk[1](solidk.ξ, solidk.η, t)))
         return _sBC
 
-    def zero(self):
+    def zero(self, sizes=()):
         """Return zero state vector (packed).
+
+        Parameters
+        ----------
+        sizes : tuple, optional
+            List of sizes (default self.sizes()).
 
         Returns
         -------
@@ -685,7 +757,11 @@ class Solver:
             Array with zeros.
 
         """
-        return np.zeros(np.sum(self.sizes()))
+
+        if not sizes:
+            sizes = self.sizes()
+
+        return np.zeros(np.sum(sizes))
 
     def pack(self, u, v, p, *s):
         """Pack flow field and forces into a single vector.
@@ -704,10 +780,14 @@ class Solver:
         Returns
         -------
         np.ndarray
-            Concatenated fields (u, v, p, [f1, g1, f2, g2, ...]).
+            Concatenated fields (u, v, p, f1, g1, f2, g2, ...).
         """
 
-        fields = [u.ravel(), v.ravel(), p.ravel()[1:]-p[0, 0]]
+        if self.pZero is not None:
+            fields = [u.ravel(), v.ravel(),
+                      p.ravel()[:self.pZero], p.ravel()[self.pZero + 1:]]
+        else:
+            fields = [u.ravel(), v.ravel(), p.ravel()]
 
         for (f, g) in s:
             fields.append(f)
@@ -715,42 +795,65 @@ class Solver:
 
         return np.concatenate(fields)
 
-    def unpack(self, x):
+    def unpack(self, x, sizes=()):
         """Return unpacked state vector.
 
         Parameters
         ----------
         x : np.ndarray
             State vector.
+        sizes : tuple, optional
+            List of sizes (default self.sizes()).
 
         Returns
         -------
         list of np.ndarray
-            (u, v, p, [f1, g1, f2, g2, ...]) fields (ravelled)
+            (u, v, p, (f1, g1), (f2, g2), ...]) fields (ravelled)
         """
-        return np.split(x, np.cumsum(self.sizes()[:-1]))
 
-    def reshape(self, *fields):
+        if not sizes:
+            sizes = self.sizes()
+
+        unpacked_x = np.split(x, np.cumsum(sizes[:-1]))
+
+        if len(unpacked_x) > 3:
+            return unpacked_x[:3] + [fk for fk in zip(unpacked_x[3::2], unpacked_x[4::2])]
+        else:
+            return unpacked_x[:3]
+
+    def reshape(self, fields, p0=None, shapes=()):
         """Return reshaped unpacked state vector.
 
         Parameters
         ----------
         field : list
             Unpacked state vector.
+        p0 : field[:].dtype
+            Value of the pressure field at the pinned point
+        shapes : tuple, optional
+            List of shapes (default self.shapes()).
 
         Returns
         -------
         list of np.ndarray
-            (u, v, p, [f1, g1, f2, g2, ...]) fields (reshaped)
+            (u, v, p, ((f1, g1), (f2, g2), ...)) fields (reshaped)
         """
+
+        if not shapes:
+            shapes = self.shapes()
 
         reshaped = []
 
-        for k, (field, shape) in enumerate(zip(fields, self.shapes())):
-            if k!=2:
+        for k, (field, shape) in enumerate(zip(fields[:3], shapes[:3])):
+            if k!=2 or p0 is None or self.pZero is None:
                 reshaped.append(field.reshape(shape))
             else:
-                reshaped.append(np.r_[0, field].reshape(shape))
+                p0 = np.asarray(p0, dtype=field.dtype)
+                reshaped.append(np.r_[field[:self.pZero], p0,
+                                      field[self.pZero:]].reshape(shape))
+
+        if len(fields)>3:
+            reshaped += fields[3:]
 
         return reshaped
 
@@ -773,10 +876,10 @@ class Solver:
         plt.title('Fluid domain and immersed boundaries')
 
         X, Y = np.meshgrid(self.fluid.x, self.fluid.y)
-        plt.plot(X, Y, 'b-', lw=0.5);
-        plt.plot(X.T, Y.T, 'b-', lw=0.5);
+        plt.plot(X, Y, 'b-', lw=0.5)
+        plt.plot(X.T, Y.T, 'b-', lw=0.5)
         for solid in self.solids:
-            plt.plot(solid.ξ, solid.η, 'o-', label=solid.name);
+            plt.plot(solid.ξ, solid.η, 'o-', label=solid.name)
         if equal:
             plt.axis('equal')
         if self.solids:
@@ -791,7 +894,8 @@ class Solver:
         if ylim:
             plt.ylim(*ylim)
 
-    def plot_field(self, x, colorbar=False, equal=True, figsize=(8, 3), xlim=(), ylim=()):
+    def plot_field(self, x, colorbar=False, equal=True, repeat=False, 
+                    figsize=(8, 3), xlim=(), ylim=()):
         """Plot field.
 
         Parameters
@@ -802,6 +906,8 @@ class Solver:
             Display colorbar.
         equal: bool, optional
             Use equal axes.
+        repeat: bool, optional
+            Repeat if the flow field is periodic.
         figsize: optional, tuple
             Size of the figure.
         xlim: optional, tuple
@@ -811,11 +917,11 @@ class Solver:
 
         """
         
-        u, v, p = self.reshape(*self.unpack(x))[:3]
+        u, v, p = self.reshape(self.unpack(x), 0)[:3]
 
         fig = plt.figure(figsize=figsize)
 
-        if not self.periodic:
+        if not self.periodic or not repeat:
             plots = ((self.fluid.u.x, self.fluid.u.y, u, 'u'),
                      (self.fluid.v.x, self.fluid.v.y, v, 'v'),
                      (self.fluid.p.x, self.fluid.p.y, p, 'p'))
@@ -837,7 +943,7 @@ class Solver:
 
             for solid in self.solids:
                 plt.plot(solid.ξ, solid.η)
-                if self.periodic:
+                if self.periodic and repeat:
                     plt.plot(solid.ξ, solid.η + Ly)
                     plt.plot(solid.ξ, solid.η - Ly)
 
