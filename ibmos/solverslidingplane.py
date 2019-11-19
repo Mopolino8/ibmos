@@ -375,7 +375,7 @@ class SolverSlidingPlane(Solver):
                        colors='k', lw=2, linestyles='dashdot', zorder=10, label='S.P.')
 
 
-    def plot_field_12(self, q, ySP=0, vSP=0, colorbar=False, equal=True, repeat=False, 
+    def plot_field_12(self, q, ySP=0, vSP=0, colorbar=False, equal=True, repeat=True, 
                      stitch=True, borders=False, figsize=(8, 3), xlim=(), ylim=()):
         """Plot field.
 
@@ -595,6 +595,7 @@ class SolverSlidingPlane(Solver):
     def sliding_plane_interpolation(self, u, v, p=None, uBC=None, vBC=None, ySP=0, vAdd=0):
         # first u and uBC
         S = interpolation_matrix(self.fluid.u.y, self.fluid.u.y + ySP)
+
         Su = u.copy()
         for slidek in range(self.iuSP, self.fluid.u.shape[1]):
             Su[:, slidek] = S@u[:, slidek]
@@ -603,7 +604,6 @@ class SolverSlidingPlane(Solver):
             SuBC[1] = S@uBC[1]
             
         # then v and vBC
-        S = interpolation_matrix(self.fluid.v.y, self.fluid.v.y + ySP)
         Sv = v.copy()
         for slidek in range(self.ivSP, self.fluid.v.shape[1]):
             Sv[:, slidek] = S@v[:, slidek] + vAdd
@@ -614,7 +614,6 @@ class SolverSlidingPlane(Solver):
 
         # and finally p
         if p is not None:
-            S = interpolation_matrix(self.fluid.p.y, self.fluid.p.y + ySP)
             Sp = p.copy()
             for slidek in range(self.ipSP, self.fluid.p.shape[1]):
                 Sp[:, slidek] = S@p[:, slidek]
@@ -631,40 +630,22 @@ class SolverSlidingPlane(Solver):
 
 
     def interpolation_matrices_update(self, ySP, *M):
-        Su = interpolation_matrix(self.fluid.u.y + ySP, self.fluid.u.y)
-        Sv = interpolation_matrix(self.fluid.v.y + ySP, self.fluid.v.y)
-        Sp = interpolation_matrix(self.fluid.p.y + ySP, self.fluid.p.y)
+        S = interpolation_matrix(self.fluid.u.y + ySP, self.fluid.u.y)
 
         for Mk in M:
             data = []
             for n, j in zip(Mk.S1name, Mk.S1j):
-                if n=='u':
-                    data.append(Su.ravel())
-                elif n=='v':
-                    data.append(Sv.ravel())
-                elif n=='p':
-                    data.append(Sp[1:,1:].ravel() if j==self.pZero else Sp.ravel())
-                else: 
-                    raise ValueError('Unsupported case')
+                data.append(S[1:, 1:].ravel() if j==self.pZero and n=='p' else S.ravel())
 
             if len(data)!=0:
                 Mk.S1.data = np.concatenate(data)
 
-        Su = interpolation_matrix(self.fluid.u.y, self.fluid.u.y + ySP)
-        Sv = interpolation_matrix(self.fluid.v.y, self.fluid.v.y + ySP)
-        Sp = interpolation_matrix(self.fluid.p.y, self.fluid.p.y + ySP)
+        S = interpolation_matrix(self.fluid.u.y, self.fluid.u.y + ySP)
 
         for Mk in M:
             data = []
             for n, j in zip(Mk.S2name, Mk.S2j):
-                if n=='u':
-                    data.append(Su.ravel())
-                elif n=='v':
-                    data.append(Sv.ravel())
-                elif n=='p':
-                    data.append(Sp[1:,1:].ravel() if j==self.pZero else Sp.ravel())
-                else: 
-                    raise ValueError('Unsupported case')
+                data.append(S[1:, 1:].ravel() if j==self.pZero and n=='p' else S.ravel())
 
             if len(data)!=0:
                 Mk.S2.data = np.concatenate(data)
