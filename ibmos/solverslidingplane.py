@@ -8,7 +8,7 @@ import scipy.sparse as sp
 from .flow import Field
 from .tools import solver_default, interpolation_matrix
 from .solver import Solver
-from .poincaresteklov import PoincareSteklov, Matrix12
+from .domaindecomposition import PoincareSteklov, Matrix12
 
 class SolverSlidingPlane(Solver):
     """Flow solver based on the Projection-based Immersed Boundary Method 
@@ -139,6 +139,9 @@ class SolverSlidingPlane(Solver):
         """
 
         if not self.stepsInitialized:
+            if verbose:
+                print("Initializing solver...", end="")
+
             self.A, self.B = self.propagator(self.fractionalStep)
 
             # Split colors, slices and names into velocity fields plus the rest
@@ -155,6 +158,8 @@ class SolverSlidingPlane(Solver):
 
             self.A[0].factorize(solver=self.solver)
             self.A[1].factorize(solver=self.solver)
+            if verbose:
+                print("done.")
 
             self.stepsInitialized = True
 
@@ -165,6 +170,23 @@ class SolverSlidingPlane(Solver):
         xres, tres, rSPres, ySPres = [], [], [], []
 
         uBC, vBC = self.eval_uvBC(t0, fuBC, fvBC)
+
+        # Contribution of the laplacian at the sliding plane due to 
+        # the relative velocity between the two subdomains
+        # Man, this one wasn't obvious !!
+
+        bvSP = np.zeros(self.pStart)
+        if vSP != 0:
+            from .tools import submat_from_colors
+
+            c = self.colors_12_from_0()[1][:self.pStart]
+            n = self.state_vector_name()[1][:self.pStart]
+
+            Lv12 = submat_from_colors(self.laplacian[1][0], 0, 1, c[n=='v'])
+            Lv21 = submat_from_colors(self.laplacian[1][0], 1, 0, c[n=='v'])
+
+            bvSP[(c==0)*(n=='v')] += vSP*self.iRe*Lv12@((self.B[0].S2@((n=='v')[c==1]))[n[c==1]=='v'])
+            bvSP[(c==1)*(n=='v')] -= vSP*self.iRe*Lv21@((self.B[0].S1@((n=='v')[c==0]))[n[c==0]=='v'])
     
         # Advection terms at the CURRENT time step.
         if self.advection:
@@ -223,7 +245,7 @@ class SolverSlidingPlane(Solver):
                     Num1, Nvm1 = self.sliding_plane_interpolation(Num1, Nvm1, ySP=-self.dt*vSP)
 
                 # Compute next time step. Time consuming part
-                b = self.B[0].dot(x[:self.pStart]) + bc[:self.pStart]
+                b = self.B[0].dot(x[:self.pStart]) + bc[:self.pStart] + bvSP
                 b += -1.5 * np.r_[Nu.ravel(), Nv.ravel()] + 0.5 * np.r_[Num1.ravel(), Nvm1.ravel()]
 
                 qast = self.A[0].solve(b, q0_ = None if k==0 else qast)
@@ -350,8 +372,8 @@ class SolverSlidingPlane(Solver):
                        colors='k', lw=2, linestyles='dashdot', zorder=10, label='S.P.')
 
 
-    def plot_field_12(self, q, ySP=0, vSP=0, colorbar=False, equal=True, repeat=False, borders=False,
-                    figsize=(8, 3), xlim=(), ylim=()):
+    def plot_field_12(self, q, ySP=0, vSP=0, colorbar=False, equal=True, repeat=False, 
+                     stitch=True, borders=False, figsize=(8, 3), xlim=(), ylim=()):
         """Plot field.
 
         Parameters
@@ -360,12 +382,18 @@ class SolverSlidingPlane(Solver):
             State vector subdomain 2(packed).
         ySP: float, optional
             Vertical displacement of the second subdomain.
+        vSP: float, optional
+            Vertical speed of the second subdomain.
         colorbar: bool, optional
             Display colorbar.
         equal: bool, optional
             Use equal axes.
         repeat: bool, optional
             Repeat if the flow field is periodic.
+        stitch: bool, optional
+            Fill gaps between the subdomains.
+        borders: bool, optional
+            Draw borders and sliding plane.
         figsize: optional, tuple
             Size of the figure.
         xlim: optional, tuple
@@ -397,18 +425,37 @@ class SolverSlidingPlane(Solver):
                 y = self.reshape(self.unpack_color(y, c, ck), p0=None if cp0!=ck else yp0)
 
                 q_ = self.reshape(self.unpack_color(q, c, ck), p0=None if cp0!=ck else 0)
+
                 if name=='v' and ck==1:
-                    q_[1]+=vSP
+                    q_[k] += vSP
+
+                if stitch:
+                    if ck == 0:
+                        x_last_slice = x[k][:, -1]
+                        q_last_slice = q_[k][:, -1]
+                    else:
+                        # If the grid spacing is constant!!!
+                        S = interpolation_matrix(self.fluid.u.y + d, self.fluid.u.y)
+
+                        x[k] = np.hstack([x_last_slice.reshape((-1, 1)), x[k]])
+                        y[k] = np.hstack([y[k][:,:1], y[k]])
+                        q_[k] = np.hstack([(S@q_last_slice).reshape((-1, 1)), q_[k]])
 
                 plt.pcolormesh(x[k], y[k] + d, q_[k], vmin=vmin, vmax=vmax, rasterized=True)
 
-                if d != 0 and repeat:
-                    plt.pcolormesh(x[k], y[k] + d - np.sign(d)*Ly, q_[k], vmin=vmin, vmax=vmax, rasterized=True)
+                if repeat:
+                    x[k] = np.vstack([x[k][-1, :], x[k], x[k][0, :]])
+                    y[k] = np.vstack([y[k][-1, :] - Ly, y[k], y[k][0, :] + Ly])
+                    q_[k] = np.vstack([q_[k][-1, :], q_[k], q_[k][0, :]])
+
+                    plt.pcolormesh(x[k], y[k] + d - Ly, q_[k], vmin=vmin, vmax=vmax, rasterized=True)
+                    plt.pcolormesh(x[k], y[k] + d + Ly, q_[k], vmin=vmin, vmax=vmax, rasterized=True)
 
                 for sxk, syk in zip(x[3:], y[3:]):
                     plt.plot(sxk[0], syk[0] + d, zorder=5)
-                    if d != 0 and repeat:
-                        plt.plot(sxk[0], syk[0] + d - np.sign(d)*Ly, zorder=5)
+                    if repeat:
+                        plt.plot(sxk[0], syk[0] + d - Ly, zorder=5)
+                        plt.plot(sxk[0], syk[0] + d + Ly, zorder=5)
 
                 if borders:
                     plt.hlines((self.fluid.y[0] + d, self.fluid.y[-1] + d), 
