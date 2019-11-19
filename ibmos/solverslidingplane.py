@@ -307,12 +307,12 @@ class SolverSlidingPlane(Solver):
             tres.append(t0 + k*self.dt)
             rSPres.append( (k*self.dt*vSP)//(self.fluid.y[-1] - self.fluid.y[0]) )
             ySPres.append( (ySP0 + k*self.dt*vSP)%(self.fluid.y[-1] - self.fluid.y[0]) )
-        except ValueError:
-            print("ValueError at t =", t0 + k*self.dt)
-            xres.append(x)
-            tres.append(t0 + k*self.dt)
-            rSPres.append( (k*self.dt*vSP)//(self.fluid.y[-1] - self.fluid.y[0]) )
-            ySPres.append( (ySP0 + k*self.dt*vSP)%(self.fluid.y[-1] - self.fluid.y[0]) )
+        #except ValueError:
+        #    print("ValueError at t =", t0 + k*self.dt)
+        #    xres.append(x)
+        #    tres.append(t0 + k*self.dt)
+        #    rSPres.append( (k*self.dt*vSP)//(self.fluid.y[-1] - self.fluid.y[0]) )
+        #    ySPres.append( (ySP0 + k*self.dt*vSP)%(self.fluid.y[-1] - self.fluid.y[0]) )
 
         # Return state vectors
         return np.squeeze(xres), np.squeeze(tres), np.squeeze(rSPres), np.squeeze(ySPres), infodict
