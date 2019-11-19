@@ -412,26 +412,7 @@ def subvecs_from_colors(v, colors):
 
     return vc
 
-def dirichlet_kernel_equispaced(x, n): 
-    """ Dirichlet kernel for equispaced data.
-
-    Parameters
-    ----------
-    x : float
-        Point
-    n : number of grid points
-        Initial grid spacing.
-
-    Returns
-    -------
-    D: float
-        Value of the Dirichlet kernel at x
-
-    """ 
-    D = np.sinc(n*x/2)/np.sinc(x/2)*(1 if n%2 else np.cos(np.pi*x/2))
-    return D
-
-def interpolation_matrix(xi, xj, kernel=dirichlet_kernel_equispaced):
+def interpolation_matrix(xi, xj):
     """Return interpolation matrix from xj to xi.
 
     Parameters
@@ -449,8 +430,18 @@ def interpolation_matrix(xi, xj, kernel=dirichlet_kernel_equispaced):
         interpolation matrix
 
     """
+    n = len(xj) - 1
+    Mpμ = (n-1)//2 + 1 if n%2 else n//2
+    scale = 2*np.pi*n/(n+1)/(xj[-1]-xj[0])
 
-    n = len(xj)
-    scale = (xj[1]-xj[0])*n/2
-    S = kernel((xi[:, np.newaxis]-xj[np.newaxis, :])/scale, n)
+    x = (xi[:, np.newaxis]-xj[np.newaxis, :])*scale
+
+    cm1 = 1-np.cos(x)
+    tol = np.sqrt(np.finfo(float).eps)
+
+    S = np.empty_like(x)
+
+    S[cm1>tol] = (np.cos(x[cm1>tol]*(Mpμ-1)) - np.cos(x[cm1>tol]*Mpμ))/(1-np.cos(x[cm1>tol]))/(n+1)
+    S[cm1<=tol] = (2*Mpμ - 1)/(n+1)
+
     return S
