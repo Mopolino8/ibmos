@@ -158,6 +158,9 @@ class SolverSlidingPlane(Solver):
 
             self.A[0].factorize(solver=self.solver)
             self.A[1].factorize(solver=self.solver)
+
+            self.interpolation_matrices_update(ySP0, *self.A, *self.B)
+
             if verbose:
                 print("done.")
 
@@ -466,6 +469,7 @@ class SolverSlidingPlane(Solver):
                 plt.axis('equal')
             if colorbar:
                 plt.colorbar()
+
             plt.xlabel('x')
             plt.ylabel('y')
 
