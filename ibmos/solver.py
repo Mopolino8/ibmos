@@ -69,7 +69,7 @@ class Solver:
         # The state vector is formed by stacking u, v, p and if we have
         # solids, also by (fx, fy) as many times as the number of solids.
         # pStart points to the first pressure value in this state vector
-        # pEnd points to the first value after the last pressure value.
+        self.vStart = self.fluid.u.size
         self.pStart = self.fluid.u.size + self.fluid.v.size
         
         # Set parameters
